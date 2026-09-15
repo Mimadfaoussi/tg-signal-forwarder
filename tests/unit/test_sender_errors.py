@@ -1,8 +1,10 @@
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
+from fakeredis import aioredis as fakeaioredis
 from publisher import main as publisher_main
 from publisher.main import AuthRevoked, PermanentSendError, TargetState
 from signal_shared.models import Signal
@@ -317,3 +319,44 @@ async def test_permanent_error_pause_redoes_preflight(monkeypatch: pytest.Monkey
 
     assert sleeps == [publisher_main.PERMANENT_ERROR_PAUSE_S]
     assert target.slow_mode_delay == 15
+
+
+@pytest.mark.asyncio
+async def test_claim_loop_reclaims_and_sends_a_pending_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression test: claim_loop crashed every run with
+    # "xautoclaim() got an unexpected keyword argument 'start'" (redis-py's
+    # actual parameter is `start_id`) -- caught only by running the real
+    # stack long enough for the 60s claim interval to fire, since no test
+    # exercised claim_loop's xautoclaim call at all before this.
+    r = fakeaioredis.FakeRedis(decode_responses=True)
+    await r.xadd(publisher_main.STREAM, make_signal_fields())
+    await r.xgroup_create(publisher_main.STREAM, publisher_main.GROUP, id="0", mkstream=True)
+    # Deliver to a now-dead consumer so the entry sits pending/unacked.
+    await r.xreadgroup(
+        publisher_main.GROUP, "dead-consumer", {publisher_main.STREAM: ">"}, count=10
+    )
+
+    monkeypatch.setattr(publisher_main, "CLAIM_IDLE_MS", 0)
+
+    sleep_calls = 0
+
+    async def fake_sleep(_seconds: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(publisher_main.asyncio, "sleep", fake_sleep)
+
+    client = make_client([[FakeMessage(99)]])
+    repo = FakeRepository()
+    limiter = FakeLimiter()
+    target = TargetState(entity="target-entity", slow_mode_delay=None)
+
+    with pytest.raises(asyncio.CancelledError):
+        await publisher_main.claim_loop(client, target, r, repo, limiter, FakeSettings())
+
+    assert client.forward_messages.call_count == 1
+    assert len(repo.sent) == 1

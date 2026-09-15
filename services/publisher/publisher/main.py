@@ -223,7 +223,7 @@ async def claim_loop(
             cursor = "0-0"
             while True:
                 cursor, entries, _ = await r.xautoclaim(
-                    STREAM, GROUP, consumer, min_idle_time=CLAIM_IDLE_MS, start=cursor, count=50
+                    STREAM, GROUP, consumer, min_idle_time=CLAIM_IDLE_MS, start_id=cursor, count=50
                 )
                 for entry_id, fields in entries:
                     log.info("entry_reclaimed", entry_id=entry_id)

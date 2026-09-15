@@ -262,3 +262,26 @@ in the target's default topic regardless of `TARGET_TOPIC_ID`. The publisher
 logs a one-time `target_topic_id_ignored_in_copy_mode` warning at startup when
 both are set together, rather than silently ignoring the setting. `template`
 mode is unaffected — it still honors `TARGET_TOPIC_ID` via `reply_to`.
+
+### Bug: `claim_loop`'s `xautoclaim` call used the wrong keyword argument
+
+Found on the VPS, in production, roughly a minute after v1.2 went live:
+`claim_loop_error` / `TypeError: StreamCommands.xautoclaim() got an
+unexpected keyword argument 'start'`, repeating every 60s. `redis-py`'s
+`Redis.xautoclaim()` names that parameter `start_id`, not `start` — a plain
+typo that no test caught, because nothing exercised `claim_loop`'s
+`xautoclaim` call at all: every prior test either mocked `redis.asyncio.Redis`
+entirely (never touching the real method signature) or ran the stack for only
+a few seconds, well under `CLAIM_INTERVAL_S` (60s). The bug was harmless by
+design — it's caught and logged (`claim_loop_error`), so `main_loop` kept
+processing new signals fine — but it silently disabled recovery of pending
+entries from crashed consumers, undermining NFR-2 without anyone the wiser.
+
+Fixed the typo and added `tests/unit/test_sender_errors.py::test_claim_loop_reclaims_and_sends_a_pending_entry`,
+which runs `claim_loop` itself (against `fakeredis`, with `CLAIM_IDLE_MS` and
+`asyncio.sleep` patched to run immediately) and asserts the pending entry
+actually gets forwarded — confirmed this test fails with the original typo
+and passes with the fix. Additionally re-verified the fix against a **real**
+Redis server (not `fakeredis`'s reimplementation) before shipping, since
+that's the gap that let the bug through in the first place: fakeredis or a
+mock can silently diverge from the real library's actual parameter names.
