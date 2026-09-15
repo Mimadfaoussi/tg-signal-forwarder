@@ -1,0 +1,23 @@
+{%- if signal.pair %}<b>#{{ signal.pair }}</b>{% endif %}
+
+{%- if signal.entries %}
+{% for entry in signal.entries %}
+Entry{{ loop.index }}: {{ entry }}
+{%- endfor %}
+{%- endif %}
+
+{% if signal.take_profits %}
+<b>TARGETS</b>
+{% for tp in signal.take_profits %}
+TP{{ tp.index }}: {{ tp.price }}{% if tp.percent is not none %} ({{ tp.percent }}%){% endif %}
+{%- endfor %}
+{%- endif %}
+
+{% if signal.stop is not none %}
+<b>Stop:</b> {{ signal.stop }}{% if signal.stop_note %} ({{ signal.stop_note }}){% endif %}
+{%- endif %}
+
+{%- if signal.signal_date %}
+
+Date: {{ signal.signal_date.isoformat() }}
+{%- endif %}

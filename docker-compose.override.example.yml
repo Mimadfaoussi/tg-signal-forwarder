@@ -1,0 +1,24 @@
+# Copy to docker-compose.override.yml for local development:
+#   cp docker-compose.override.example.yml docker-compose.override.yml
+#
+# Mounts service source code so edits are picked up without rebuilding, and
+# raises log verbosity to DEBUG.
+
+services:
+  listener:
+    environment:
+      LOG_LEVEL: DEBUG
+    volumes:
+      - ./data/session/listener:/data/session
+      - ./shared/signal_shared:/opt/venv/lib/python3.12/site-packages/signal_shared:ro
+      - ./services/listener/listener:/app/listener:ro
+
+  publisher:
+    environment:
+      LOG_LEVEL: DEBUG
+    volumes:
+      - ./data/session/publisher:/data/session
+      - ./shared/signal_shared:/opt/venv/lib/python3.12/site-packages/signal_shared:ro
+      - ./services/publisher/publisher:/app/publisher:ro
+      - ./services/publisher/migrations:/app/migrations:ro
+      - ./services/publisher/templates:/app/templates:ro

@@ -1,0 +1,80 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 128m
+    restart: unless-stopped
+    logging: *default-logging
+    networks:
+      - internal
+
+  postgres:
+    image: postgres:16-alpine
+    env_file: .env
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 512m
+    restart: unless-stopped
+    logging: *default-logging
+    networks:
+      - internal
+
+  listener:
+    build:
+      context: .
+      dockerfile: services/listener/Dockerfile
+    env_file: .env
+    volumes:
+      - ./data/session/listener:/data/session
+    depends_on:
+      redis:
+        condition: service_healthy
+    mem_limit: 256m
+    restart: unless-stopped
+    logging: *default-logging
+    networks:
+      - internal
+
+  publisher:
+    build:
+      context: .
+      dockerfile: services/publisher/Dockerfile
+    env_file: .env
+    volumes:
+      - ./data/session/publisher:/data/session
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    mem_limit: 256m
+    restart: unless-stopped
+    logging: *default-logging
+    networks:
+      - internal
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  redis-data:
+  pg-data:
