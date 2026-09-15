@@ -13,13 +13,12 @@ from signal_shared.telegram import ChatPermission, describe_chat_permissions, ma
 from telethon import TelegramClient
 from telethon.errors import (
     ChannelPrivateError,
+    ChatForwardsRestrictedError,
     ChatRestrictedError,
     ChatWriteForbiddenError,
     PeerIdInvalidError,
     UserBannedInChannelError,
 )
-
-from publisher.entities import rebuild_entities
 
 PERMANENT_ERRORS: tuple[type[Exception], ...] = (
     ChatWriteForbiddenError,
@@ -27,6 +26,7 @@ PERMANENT_ERRORS: tuple[type[Exception], ...] = (
     ChatRestrictedError,
     ChannelPrivateError,
     PeerIdInvalidError,
+    ChatForwardsRestrictedError,
 )
 
 
@@ -69,23 +69,22 @@ async def preflight(client: TelegramClient, target_chat: str, log: Any) -> ChatP
     return permission
 
 
-def render_message(
-    signal: Signal, *, output_mode: str, account_is_premium: bool, template_dir: str
-) -> tuple[str, list[Any] | None, str | None]:
-    """Returns (text, formatting_entities, parse_mode)."""
-    if output_mode == "template":
-        env = jinja2.Environment(
-            loader=jinja2.FileSystemLoader(template_dir),
-            trim_blocks=True,
-            lstrip_blocks=True,
-            autoescape=jinja2.select_autoescape(default=True),
-        )
-        template = env.get_template("signal.txt.j2")
-        text = template.render(signal=signal).strip()
-        return text, None, "html"
+def render_template_message(signal: Signal, *, template_dir: str) -> str:
+    env = jinja2.Environment(
+        loader=jinja2.FileSystemLoader(template_dir),
+        trim_blocks=True,
+        lstrip_blocks=True,
+        autoescape=jinja2.select_autoescape(default=True),
+    )
+    template = env.get_template("signal.txt.j2")
+    return template.render(signal=signal).strip()
 
-    entities = rebuild_entities(signal.raw_entities, account_is_premium=account_is_premium)
-    return signal.raw_text, entities, None
+
+def preview_text(signal: Signal, *, output_mode: str, template_dir: str) -> str:
+    """What DRY_RUN logs as the outgoing payload."""
+    if output_mode == "template":
+        return render_template_message(signal, template_dir=template_dir)
+    return signal.raw_text
 
 
 async def send_signal(
@@ -93,18 +92,33 @@ async def send_signal(
     *,
     target: Any,
     target_topic_id: int | None,
-    text: str,
-    entities: list[Any] | None,
-    parse_mode: str | None,
+    output_mode: str,
+    signal: Signal,
+    template_dir: str,
 ) -> Any:
-    return await client.send_message(
+    """Sends the signal to `target` and returns the resulting Message.
+
+    `copy` mode does a real Telegram forward of the original source message
+    (kept formatting, no re-authoring) rather than composing a new one.
+    `template` mode still composes and sends a brand-new message rendered
+    from the parsed fields, since there's no "original" to forward.
+    """
+    if output_mode == "template":
+        text = render_template_message(signal, template_dir=template_dir)
+        return await client.send_message(
+            target,
+            text,
+            parse_mode="html",
+            reply_to=target_topic_id,
+            link_preview=False,
+        )
+
+    messages = await client.forward_messages(
         target,
-        text,
-        formatting_entities=entities,
-        parse_mode=parse_mode,
-        reply_to=target_topic_id,
-        link_preview=False,
+        signal.source_message_id,
+        from_peer=signal.source_chat_id,
     )
+    return messages[0]
 
 
 async def _check_target_cli() -> None:

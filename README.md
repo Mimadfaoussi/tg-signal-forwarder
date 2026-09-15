@@ -144,13 +144,21 @@ can fail, e.g. `broadcast_channel_requires_admin`, `restricted_from_sending`,
 
 ## Output format
 
-`OUTPUT_MODE=copy` (default) re-sends the original message text and formatting
-as-is, rebuilding Telegram formatting entities from what the listener captured.
-Custom-emoji entities only render for Telegram Premium accounts — set
-`ACCOUNT_IS_PREMIUM=true` to keep them, otherwise they're dropped and the
-fallback emoji text is left in place. `OUTPUT_MODE=template` renders
-`services/publisher/templates/signal.txt.j2` from the parsed signal fields
-instead, as HTML.
+`OUTPUT_MODE=copy` (default) does a real Telegram **forward** of the original
+source message — not a re-authored copy. Formatting, media, and custom emoji
+all come through exactly as posted, since it's the same message, just
+delivered into the target chat. If the source channel has "Restrict Saving
+Content" enabled, forwarding is blocked by Telegram entirely — that signal
+dead-letters (see Troubleshooting) rather than falling back to anything else.
+Note: forwarding doesn't support targeting a specific forum topic, so
+`TARGET_TOPIC_ID` is ignored in this mode (a warning is logged once at
+startup if both are set) — use `template` mode if you need that.
+
+`OUTPUT_MODE=template` renders `services/publisher/templates/signal.txt.j2`
+from the *parsed* signal fields instead (as HTML), composing a brand-new
+message rather than forwarding — useful if you want a normalized look
+regardless of how the source channel formats things, or if you need
+`TARGET_TOPIC_ID` targeting.
 
 ## Account safety and rate limiting
 
@@ -190,6 +198,12 @@ editing — copy it to `docker-compose.override.yml` to use it.
   preflight check before resuming — you don't need to restart it manually,
   though fixing the underlying permission issue sooner means less delay. Once
   fixed, `make replay-dead` retries what fell through.
+- **Every signal dead-letters with `ChatForwardsRestrictedError`:** the source
+  channel has "Restrict Saving Content" enabled, which blocks forwarding via
+  the API entirely — no amount of retrying fixes this. There's no workaround
+  in `copy` mode; switch to `OUTPUT_MODE=template` if you need to keep
+  forwarding signals from a protected channel (it composes a new message from
+  the parsed fields instead of forwarding the original).
 - **`AUTH_KEY_DUPLICATED` / session revoked:** something used the same session
   from two places at once, or you revoked it in Telegram → Settings →
   Devices. Re-run the affected service's login.

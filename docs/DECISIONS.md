@@ -212,3 +212,53 @@ login, since the Makefile description says "run only the target preflight
 check," and an unattended `make check-target` shouldn't block waiting on a
 phone code. If the session isn't authorized yet, it exits(2) with a hint to
 run `make login-publisher` first, same as the main service would.
+
+## v1.2 (operator request: transfer instead of copy)
+
+After v1.1 shipped, the operator asked for `OUTPUT_MODE=copy` to actually
+*transfer* (forward) the source message rather than re-authoring a new one
+from `raw_text`/`raw_entities`. Confirmed with the operator that a source
+channel with "Restrict Saving Content" enabled should dead-letter (permanent
+error, no retry) rather than silently falling back to a copy-send.
+
+### `copy` mode now does a real Telethon forward
+
+`sender.send_signal()` calls `client.forward_messages(target, signal.source_message_id,
+from_peer=signal.source_chat_id)` for `copy` mode instead of composing
+`send_message(text, formatting_entities=...)`. `template` mode is unchanged —
+it still composes and sends a new message, since there's no "original" to
+forward once the content has been reduced to parsed fields. This made
+`rebuild_entities()` and `ACCOUNT_IS_PREMIUM` (only ever used by the old
+copy-mode path) dead code; both were removed along with `entities.py` and its
+tests, rather than left unused.
+
+### `ChatForwardsRestrictedError` joins `PERMANENT_ERRORS`
+
+A source channel with "Restrict Saving Content" enabled makes Telegram reject
+forwarding entirely at the API level (`ChatForwardsRestrictedError`) — no
+retry schedule fixes that. Per the operator's explicit choice, this is treated
+like the other permanent errors: dead-lettered immediately, no retry, 10-minute
+pause before redoing preflight (§6.5) — not a silent fallback to composing a
+new message instead.
+
+### The publisher's session needs to warm its own entity cache before forwarding
+
+`from_peer=signal.source_chat_id` only resolves if Telethon's *local* session
+cache already knows that chat's `access_hash` — and the publisher's session
+has never otherwise interacted with the source chat (only the listener's
+session has). Confirmed by testing forwarding a numeric `TARGET_CHAT` id right
+after a fresh login: `Cannot find any entity corresponding to "..."`, the same
+failure mode as an uncached numeric `TARGET_CHAT`. Fixed by calling
+`client.get_dialogs()` once at publisher startup (only when `OUTPUT_MODE=copy`)
+before the main loop starts — the account is necessarily a member of the
+source chat already, so this warms the cache for it (and everything else the
+account is in) without needing `SOURCE_CHAT` duplicated into `PublisherSettings`.
+
+### `TARGET_TOPIC_ID` isn't supported by `forward_messages` in `copy` mode
+
+Telethon's high-level `forward_messages()` has no forum-topic-targeting
+parameter (unlike `send_message`'s `reply_to`), so a forwarded message lands
+in the target's default topic regardless of `TARGET_TOPIC_ID`. The publisher
+logs a one-time `target_topic_id_ignored_in_copy_mode` warning at startup when
+both are set together, rather than silently ignoring the setting. `template`
+mode is unaffected — it still honors `TARGET_TOPIC_ID` via `reply_to`.

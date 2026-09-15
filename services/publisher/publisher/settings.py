@@ -12,7 +12,6 @@ class PublisherSettings(BaseAppSettings):
     target_chat: str
     target_topic_id: int | None = None
     output_mode: str = "copy"
-    account_is_premium: bool = False
     dry_run: bool = False
 
     min_send_interval: float = 5.0

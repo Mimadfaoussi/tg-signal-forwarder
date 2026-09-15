@@ -33,7 +33,6 @@ MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "services" / "publisher" 
 
 class FakeSettings:
     output_mode = "copy"
-    account_is_premium = False
     dry_run = False
     target_chat = "-1009999999"
     target_topic_id = None
@@ -61,7 +60,7 @@ def _make_fields(fixture: str, signal_id: str) -> dict:
 
 def make_client(message_id: int) -> AsyncMock:
     client = AsyncMock()
-    client.send_message = AsyncMock(return_value=FakeMessage(message_id))
+    client.forward_messages = AsyncMock(return_value=[FakeMessage(message_id)])
     return client
 
 
@@ -124,7 +123,7 @@ async def test_signal_is_delivered_once_and_recorded(pool: asyncpg.Pool, r: aior
         settings=FakeSettings(),
     )
 
-    assert client.send_message.call_count == 1
+    assert client.forward_messages.call_count == 1
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -179,7 +178,7 @@ async def test_restart_mid_flight_does_not_lose_or_duplicate(
     )
 
     # Nothing lost: exactly one send happened and the row is marked sent.
-    assert client.send_message.call_count == 1
+    assert client.forward_messages.call_count == 1
     async with pool.acquire() as conn:
         status = await conn.fetchval("SELECT status FROM signals WHERE signal_id = $1", "-1002:1")
     assert status == "sent"
@@ -195,7 +194,7 @@ async def test_restart_mid_flight_does_not_lose_or_duplicate(
         limiter=limiter,
         settings=FakeSettings(),
     )
-    assert client.send_message.call_count == 1
+    assert client.forward_messages.call_count == 1
 
     pending = await r.xpending(publisher_main.STREAM, publisher_main.GROUP)
     assert pending["pending"] == 0

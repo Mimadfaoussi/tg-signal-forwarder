@@ -30,7 +30,7 @@ from publisher.sender import (
     PERMANENT_ERRORS,
     TargetNotWritable,
     preflight,
-    render_message,
+    preview_text,
     send_signal,
 )
 from publisher.settings import PublisherSettings
@@ -105,14 +105,8 @@ async def process_entry(
         bound_log.info("duplicate_send_skipped")
         return
 
-    text, entities, parse_mode = render_message(
-        signal,
-        output_mode=settings.output_mode,
-        account_is_premium=settings.account_is_premium,
-        template_dir=TEMPLATE_DIR,
-    )
-
     if settings.dry_run:
+        text = preview_text(signal, output_mode=settings.output_mode, template_dir=TEMPLATE_DIR)
         bound_log.info("dry_run_signal", payload=text)
         await repo.record_dry_run(signal)
         await r.xack(STREAM, GROUP, entry_id)
@@ -127,9 +121,9 @@ async def process_entry(
                 client,
                 target=target.entity,
                 target_topic_id=settings.target_topic_id,
-                text=text,
-                entities=entities,
-                parse_mode=parse_mode,
+                output_mode=settings.output_mode,
+                signal=signal,
+                template_dir=TEMPLATE_DIR,
             )
         except (FloodWaitError, SlowModeWaitError) as exc:
             wait_s = exc.seconds + 1
@@ -281,6 +275,21 @@ async def async_main() -> None:
             hint="Run 'make login-publisher' to authorize the publisher's Telegram user session.",
         )
         sys.exit(2)
+
+    if settings.output_mode == "copy" and settings.target_topic_id is not None:
+        log.warning(
+            "target_topic_id_ignored_in_copy_mode",
+            hint="Telethon's forward_messages has no forum-topic targeting; the "
+            "forward will land in the target's default topic. Use OUTPUT_MODE=template "
+            "if you need it to land in a specific forum topic.",
+        )
+
+    # Forwarding (copy mode) needs the source chat's entity cached locally so
+    # `from_peer=signal.source_chat_id` resolves; this session never otherwise
+    # interacts with the source chat, so warm the cache from all chats the
+    # account is a member of (get_entity on a bare id fails without this).
+    if settings.output_mode == "copy":
+        await client.get_dialogs()
 
     pool = await asyncpg.create_pool(dsn=settings.database_url)
     await run_migrations(pool, Path(__file__).resolve().parent.parent / "migrations")
