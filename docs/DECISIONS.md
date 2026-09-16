@@ -285,3 +285,53 @@ and passes with the fix. Additionally re-verified the fix against a **real**
 Redis server (not `fakeredis`'s reimplementation) before shipping, since
 that's the gap that let the bug through in the first place: fakeredis or a
 mock can silently diverge from the real library's actual parameter names.
+
+### Bug: the same signal got forwarded up to 5 times
+
+Reported by the operator in production: one SAGA/USDT signal appeared
+multiple times in the target chat. Postgres showed the row as `status='failed'`
+with `attempts=5` and no `target_message_id` — meaning our own bookkeeping
+never once considered it delivered, yet it visibly arrived in the chat
+repeatedly. Root cause: `process_entry`'s retry loop calls `send_signal()`
+(and therefore `client.forward_messages()` / `client.send_message()`) as a
+fresh call on every attempt. Telegram's protocol has a client-supplied
+`random_id` specifically so a retried request — e.g. one where the response
+was lost on a flaky connection even though Telegram already delivered the
+message server-side — can be recognized as a duplicate and return the
+existing message instead of creating a new one. But Telethon's high-level
+`forward_messages`/`send_message` generate a **new** random_id on every call,
+so our outer retry loop (an independent, fresh call each time from Telethon's
+perspective) got none of that protection: every "the response didn't come
+back in time" retry created a genuinely new, real message, while our code —
+having never received a successful response from *any* attempt — kept
+retrying and eventually dead-lettered it as failed. Very plausible trigger:
+the VPS's Docker daemon, network, and containers were all considerably
+unstable on deploy day (see the git/snap/socket saga in the conversation this
+was found in), exactly the kind of environment that produces "request
+succeeded, response lost" connection drops mid-RPC.
+
+Fixed by dropping to Telethon's raw API (`functions.messages.ForwardMessagesRequest`
+/ `SendMessageRequest`) directly instead of the high-level wrappers, so an
+explicit `random_id` can be supplied — deterministic per `(signal_id, mode)`
+via a SHA-256-derived value (`_stable_random_id`), so every retry of the same
+signal (within one `process_entry` call, or even across a crash/restart that
+redelivers the same Redis entry) reuses the identical random_id. This makes
+Telegram's own server-side dedup do the actual work, closing the gap
+regardless of *why* a response got lost, rather than trying to more carefully
+guess which exceptions are safe to retry.
+
+This requires two Telethon internals that aren't part of the public API:
+`client._parse_message_text(text, parse_mode)` (HTML → text + formatting
+entities, for `template` mode) and `client._get_response_message(request,
+result, input_chat)` (extracts the resulting `Message` from the raw
+`Updates`, matched by `random_id`) — both are exactly what Telethon's own
+`send_message`/`forward_messages` call internally, so they're not fragile
+reverse-engineering, but they are unversioned/private and could change in a
+future Telethon release without notice. Verified the whole mechanism two
+ways before shipping: a unit test that captures the `random_id` seen across
+all `MAX_ATTEMPTS` retries and asserts they're identical (and correctly
+equal to `_stable_random_id(...)`), and a standalone script exercising
+`_parse_message_text` and `_get_response_message` against a **real**
+`TelegramClient` instance (not a mock) with a hand-built `Updates` response,
+confirming both the correct-random_id and mismatched-random_id cases resolve
+exactly as expected against Telethon's actual internal matching logic.

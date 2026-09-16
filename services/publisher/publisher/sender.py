@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import sys
 from typing import Any
 
@@ -19,6 +20,8 @@ from telethon.errors import (
     PeerIdInvalidError,
     UserBannedInChannelError,
 )
+from telethon.tl import functions
+from telethon.tl import types as tl_types
 
 PERMANENT_ERRORS: tuple[type[Exception], ...] = (
     ChatWriteForbiddenError,
@@ -87,6 +90,23 @@ def preview_text(signal: Signal, *, output_mode: str, template_dir: str) -> str:
     return signal.raw_text
 
 
+def _stable_random_id(signal_id: str, *, salt: str) -> int:
+    """A signed 64-bit random_id, deterministic per (signal_id, salt).
+
+    Telegram's send/forward RPCs take a client-supplied random_id specifically
+    so that a retried request (e.g. after the response was lost on a flaky
+    connection, even though the message was already delivered server-side)
+    can be recognized as a duplicate: sending the same random_id again returns
+    the already-created message instead of creating a second one. Our own
+    retry loop calls send/forward fresh on every attempt, so a stable, known
+    random_id is what actually makes those retries idempotent -- reusing
+    Telethon's high-level send_message/forward_messages would generate a new
+    random_id every call and lose that protection entirely.
+    """
+    digest = hashlib.sha256(f"{signal_id}:{salt}".encode()).digest()[:8]
+    return int.from_bytes(digest, "big", signed=False) - (1 << 63)
+
+
 async def send_signal(
     client: TelegramClient,
     *,
@@ -102,23 +122,39 @@ async def send_signal(
     (kept formatting, no re-authoring) rather than composing a new one.
     `template` mode still composes and sends a brand-new message rendered
     from the parsed fields, since there's no "original" to forward.
+
+    Uses the raw API directly (rather than client.forward_messages /
+    client.send_message) so a deterministic random_id can be supplied --
+    see `_stable_random_id`.
     """
+    to_peer = await client.get_input_entity(target)
+
     if output_mode == "template":
         text = render_template_message(signal, template_dir=template_dir)
-        return await client.send_message(
-            target,
-            text,
-            parse_mode="html",
-            reply_to=target_topic_id,
-            link_preview=False,
+        parsed_text, entities = await client._parse_message_text(text, "html")
+        request = functions.messages.SendMessageRequest(
+            peer=to_peer,
+            message=parsed_text,
+            entities=entities,
+            no_webpage=True,
+            reply_to=(
+                None if target_topic_id is None else tl_types.InputReplyToMessage(target_topic_id)
+            ),
+            random_id=_stable_random_id(signal.signal_id, salt="template"),
         )
+        result = await client(request)
+        return client._get_response_message(request, result, to_peer)
 
-    messages = await client.forward_messages(
-        target,
-        signal.source_message_id,
-        from_peer=signal.source_chat_id,
+    from_peer = await client.get_input_entity(signal.source_chat_id)
+    request = functions.messages.ForwardMessagesRequest(
+        from_peer=from_peer,
+        id=[signal.source_message_id],
+        to_peer=to_peer,
+        random_id=[_stable_random_id(signal.signal_id, salt="forward")],
     )
-    return messages[0]
+    result = await client(request)
+    sent = client._get_response_message(request, result, to_peer)
+    return sent[0]
 
 
 async def _check_target_cli() -> None:

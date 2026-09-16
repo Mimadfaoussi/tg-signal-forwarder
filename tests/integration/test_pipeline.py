@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import asyncpg
 import pytest
@@ -59,8 +59,9 @@ def _make_fields(fixture: str, signal_id: str) -> dict:
 
 
 def make_client(message_id: int) -> AsyncMock:
-    client = AsyncMock()
-    client.forward_messages = AsyncMock(return_value=[FakeMessage(message_id)])
+    client = AsyncMock(return_value="raw-result")
+    client.get_input_entity = AsyncMock(return_value="input-entity")
+    client._get_response_message = Mock(return_value=[FakeMessage(message_id)])
     return client
 
 
@@ -123,7 +124,7 @@ async def test_signal_is_delivered_once_and_recorded(pool: asyncpg.Pool, r: aior
         settings=FakeSettings(),
     )
 
-    assert client.forward_messages.call_count == 1
+    assert client.call_count == 1
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -178,7 +179,7 @@ async def test_restart_mid_flight_does_not_lose_or_duplicate(
     )
 
     # Nothing lost: exactly one send happened and the row is marked sent.
-    assert client.forward_messages.call_count == 1
+    assert client.call_count == 1
     async with pool.acquire() as conn:
         status = await conn.fetchval("SELECT status FROM signals WHERE signal_id = $1", "-1002:1")
     assert status == "sent"
@@ -194,7 +195,7 @@ async def test_restart_mid_flight_does_not_lose_or_duplicate(
         limiter=limiter,
         settings=FakeSettings(),
     )
-    assert client.forward_messages.call_count == 1
+    assert client.call_count == 1
 
     pending = await r.xpending(publisher_main.STREAM, publisher_main.GROUP)
     assert pending["pending"] == 0

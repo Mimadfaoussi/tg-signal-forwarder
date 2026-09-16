@@ -1,7 +1,7 @@
 import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fakeredis import aioredis as fakeaioredis
@@ -102,15 +102,22 @@ def no_real_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(publisher_main.asyncio, "sleep", fast_sleep)
 
 
-def make_client(forward_side_effect) -> AsyncMock:
-    client = AsyncMock()
-    client.forward_messages = AsyncMock(side_effect=forward_side_effect)
+def make_client(call_side_effect, *, response_message=None) -> AsyncMock:
+    """A fake Telethon client for the raw-API send path: `client(request)` is
+    the RPC call (raises/returns per `call_side_effect`), `get_input_entity`
+    always succeeds, and `_get_response_message` (sync, called only after a
+    successful RPC) returns `response_message` -- a list for forward mode
+    (`sent[0]` is used), a single Message for template mode.
+    """
+    client = AsyncMock(side_effect=call_side_effect)
+    client.get_input_entity = AsyncMock(return_value="input-entity")
+    client._get_response_message = Mock(return_value=response_message)
     return client
 
 
 @pytest.mark.asyncio
 async def test_process_entry_success() -> None:
-    client = make_client([[FakeMessage(42)]])
+    client = make_client(["raw-result"], response_message=[FakeMessage(42)])
     r, repo, limiter = FakeRedis(), FakeRepository(), FakeLimiter()
     target = TargetState(entity="target-entity", slow_mode_delay=None)
 
@@ -134,7 +141,10 @@ async def test_process_entry_success() -> None:
 
 @pytest.mark.asyncio
 async def test_flood_wait_retries_without_counting_as_an_attempt() -> None:
-    client = make_client([FloodWaitError(request=None, capture=5), [FakeMessage(7)]])
+    client = make_client(
+        [FloodWaitError(request=None, capture=5), "raw-result"],
+        response_message=[FakeMessage(7)],
+    )
     r, repo, limiter = FakeRedis(), FakeRepository(), FakeLimiter()
     target = TargetState(entity="target-entity", slow_mode_delay=None)
 
@@ -149,14 +159,17 @@ async def test_flood_wait_retries_without_counting_as_an_attempt() -> None:
         settings=FakeSettings(),
     )
 
-    assert client.forward_messages.call_count == 2
+    assert client.call_count == 2
     assert len(repo.sent) == 1
     assert repo.sent[0][3] == 1  # attempts: the flood wait didn't count
 
 
 @pytest.mark.asyncio
 async def test_slow_mode_wait_retries_same_message() -> None:
-    client = make_client([SlowModeWaitError(request=None, capture=10), [FakeMessage(9)]])
+    client = make_client(
+        [SlowModeWaitError(request=None, capture=10), "raw-result"],
+        response_message=[FakeMessage(9)],
+    )
     r, repo, limiter = FakeRedis(), FakeRepository(), FakeLimiter()
     target = TargetState(entity="target-entity", slow_mode_delay=None)
 
@@ -171,7 +184,7 @@ async def test_slow_mode_wait_retries_same_message() -> None:
         settings=FakeSettings(),
     )
 
-    assert client.forward_messages.call_count == 2
+    assert client.call_count == 2
     assert len(repo.sent) == 1
 
 
@@ -192,7 +205,7 @@ async def test_connection_error_backs_off_then_dead_letters() -> None:
         settings=FakeSettings(),
     )
 
-    assert client.forward_messages.call_count == publisher_main.MAX_ATTEMPTS
+    assert client.call_count == publisher_main.MAX_ATTEMPTS
     assert len(repo.failed) == 1
     assert r.acked == [("signals.raw", "publishers", "1-0")]
     assert len(r.dead_letters) == 1
@@ -216,7 +229,7 @@ async def test_chat_write_forbidden_does_not_retry_and_raises_permanent_error() 
             settings=FakeSettings(),
         )
 
-    assert client.forward_messages.call_count == 1
+    assert client.call_count == 1
     assert len(repo.failed) == 1
     assert r.acked == [("signals.raw", "publishers", "1-0")]
     assert len(r.dead_letters) == 1
@@ -242,7 +255,7 @@ async def test_chat_forwards_restricted_does_not_retry_and_raises_permanent_erro
             settings=FakeSettings(),
         )
 
-    assert client.forward_messages.call_count == 1
+    assert client.call_count == 1
     assert len(repo.failed) == 1
     assert r.acked == [("signals.raw", "publishers", "1-0")]
     assert len(r.dead_letters) == 1
@@ -274,7 +287,7 @@ async def test_auth_key_duplicated_raises_and_leaves_message_pending() -> None:
 
 @pytest.mark.asyncio
 async def test_duplicate_signal_id_skips_send() -> None:
-    client = make_client([[FakeMessage(1)]])
+    client = make_client(["raw-result"], response_message=[FakeMessage(1)])
     r = FakeRedis()
     repo = FakeRepository(existing_status="sent")
     limiter = FakeLimiter()
@@ -291,9 +304,44 @@ async def test_duplicate_signal_id_skips_send() -> None:
         settings=FakeSettings(),
     )
 
-    assert client.forward_messages.call_count == 0
+    assert client.call_count == 0
     assert repo.sent == []
     assert r.acked == [("signals.raw", "publishers", "1-0")]
+
+
+@pytest.mark.asyncio
+async def test_same_signal_uses_the_same_random_id_across_retries() -> None:
+    # This is the actual fix for "forwarded 5 times": Telegram's server
+    # recognizes a repeated random_id and returns the already-created message
+    # instead of making a duplicate, but only if every retry supplies the
+    # SAME random_id. Confirms our retry loop does that.
+    from publisher.sender import _stable_random_id
+
+    seen_random_ids: list[int] = []
+
+    async def capture_random_id(request):
+        seen_random_ids.append(request.random_id[0])
+        raise ConnectionError("simulated: response lost after real send")
+
+    client = AsyncMock(side_effect=capture_random_id)
+    client.get_input_entity = AsyncMock(return_value="input-entity")
+    r, repo, limiter = FakeRedis(), FakeRepository(), FakeLimiter()
+    target = TargetState(entity="target-entity", slow_mode_delay=None)
+
+    await publisher_main.process_entry(
+        "1-0",
+        make_signal_fields("-1001:1"),
+        client=client,
+        target=target,
+        r=r,
+        repo=repo,
+        limiter=limiter,
+        settings=FakeSettings(),
+    )
+
+    assert len(seen_random_ids) == publisher_main.MAX_ATTEMPTS
+    assert len(set(seen_random_ids)) == 1  # every attempt reused the same one
+    assert seen_random_ids[0] == _stable_random_id("-1001:1", salt="forward")
 
 
 @pytest.mark.asyncio
@@ -350,7 +398,7 @@ async def test_claim_loop_reclaims_and_sends_a_pending_entry(
 
     monkeypatch.setattr(publisher_main.asyncio, "sleep", fake_sleep)
 
-    client = make_client([[FakeMessage(99)]])
+    client = make_client(["raw-result"], response_message=[FakeMessage(99)])
     repo = FakeRepository()
     limiter = FakeLimiter()
     target = TargetState(entity="target-entity", slow_mode_delay=None)
@@ -358,5 +406,5 @@ async def test_claim_loop_reclaims_and_sends_a_pending_entry(
     with pytest.raises(asyncio.CancelledError):
         await publisher_main.claim_loop(client, target, r, repo, limiter, FakeSettings())
 
-    assert client.forward_messages.call_count == 1
+    assert client.call_count == 1
     assert len(repo.sent) == 1
