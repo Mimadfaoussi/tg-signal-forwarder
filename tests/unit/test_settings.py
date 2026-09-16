@@ -1,6 +1,6 @@
 import pytest
 from pydantic import ValidationError
-from signal_shared.settings import BaseAppSettings, describe_config_error
+from signal_shared.settings import BaseAppSettings, describe_config_error, split_csv
 
 
 class _RequiredFieldSettings(BaseAppSettings):
@@ -30,3 +30,15 @@ def test_quote_assets_list_splits_and_normalizes() -> None:
 def test_quote_assets_list_default() -> None:
     settings = BaseAppSettings(_env_file=None)  # type: ignore[call-arg]
     assert settings.quote_assets_list == ["USDT"]
+
+
+def test_split_csv_trims_and_drops_empty_parts() -> None:
+    assert split_csv("-100111, -100222 ,,@somechannel") == ["-100111", "-100222", "@somechannel"]
+
+
+def test_split_csv_single_value() -> None:
+    assert split_csv("-1004463995445") == ["-1004463995445"]
+
+
+def test_split_csv_empty_string() -> None:
+    assert split_csv("") == []

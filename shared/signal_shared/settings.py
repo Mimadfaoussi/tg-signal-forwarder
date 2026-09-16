@@ -4,6 +4,11 @@ from pydantic import ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def split_csv(value: str) -> list[str]:
+    """Splits a comma-separated env var into trimmed, non-empty parts."""
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
 def describe_config_error(exc: ValidationError) -> str:
     """Summarize a settings ValidationError without leaking any field's value.
 
@@ -28,4 +33,4 @@ class BaseAppSettings(BaseSettings):
 
     @property
     def quote_assets_list(self) -> list[str]:
-        return [q.strip().upper() for q in self.quote_assets.split(",") if q.strip()]
+        return [q.upper() for q in split_csv(self.quote_assets)]

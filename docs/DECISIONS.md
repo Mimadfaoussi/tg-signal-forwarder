@@ -335,3 +335,38 @@ equal to `_stable_random_id(...)`), and a standalone script exercising
 `TelegramClient` instance (not a mock) with a hand-built `Updates` response,
 confirming both the correct-random_id and mismatched-random_id cases resolve
 exactly as expected against Telethon's actual internal matching logic.
+
+## Multiple source channels
+
+The operator asked to watch a second source channel. §16's "future work" list
+named this explicitly as out of v1 scope ("more than one source or target,
+with a routing config per source"), but flagged that "the design should make
+this easy to add later" — and it was: every downstream piece (Redis queue,
+dedupe keys, catch-up checkpoints, the `signals` table, the publisher) is
+already keyed by `source_chat_id`, which comes from each individual message,
+not a fixed setting. Only the listener itself assumed a single `SOURCE_CHAT`.
+
+`SOURCE_CHAT` now accepts a comma-separated list, reusing the exact pattern
+`QUOTE_ASSETS` already established (and a `split_csv()` helper extracted into
+`shared/` so both settings classes, and their tests, share one implementation
+rather than duplicating the comma-splitting logic). One listener process
+watches all configured sources: `events.NewMessage(chats=entities)` accepts a
+list of entities directly (confirmed via Telethon's own signature), so no
+extra client connections, containers, or sessions are needed. Catch-up runs
+once per source (sequentially, to avoid amplifying flood-wait risk), and the
+live event handler now derives `chat_id` from `event.chat_id` per message
+(confirmed via Telethon's source to return the exact same marked-id value as
+`utils.get_peer_id()`) instead of a single closed-over constant, since events
+can now arrive from any of the configured sources. If any configured source
+fails to resolve at startup, the listener exits(3) rather than silently
+starting with a partial source list.
+
+No test exercises `listener/main.py`'s multi-source wiring directly: `make
+test` runs from the publisher's Docker test stage (see the "Test
+infrastructure" decision above), which doesn't have the `listener` package
+available at all. The one genuinely new piece of *logic* (parsing the
+comma-separated list) was extracted into the shared, already-tested
+`split_csv()` helper specifically so it has coverage despite that constraint;
+the wiring itself (multiple `get_entity` calls, looped catch-up, the event
+filter) was verified by building the actual listener image and constructing
+`ListenerSettings` with a multi-value `SOURCE_CHAT` inside the container.

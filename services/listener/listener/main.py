@@ -123,32 +123,38 @@ async def async_main() -> None:
         )
         sys.exit(2)
 
-    try:
-        entity = await client.get_entity(_parse_source_chat(settings.source_chat))
-    except Exception as exc:
-        log.error("source_chat_unresolvable", source_chat=settings.source_chat, error=str(exc))
-        sys.exit(3)
-
-    # get_peer_id returns the marked id (-100-prefixed for channels, negative for
-    # basic groups) matching the id used everywhere else: dedupe keys, signal_id,
-    # Postgres rows, and the -100xxxxxxxxxx form operators pass as SOURCE_CHAT.
-    chat_id = telethon_utils.get_peer_id(entity)
+    entities = []
+    chat_ids = []
+    for source_chat in settings.source_chats_list:
+        try:
+            entity = await client.get_entity(_parse_source_chat(source_chat))
+        except Exception as exc:
+            log.error("source_chat_unresolvable", source_chat=source_chat, error=str(exc))
+            sys.exit(3)
+        entities.append(entity)
+        # get_peer_id returns the marked id (-100-prefixed for channels, negative
+        # for basic groups) matching the id used everywhere else: dedupe keys,
+        # signal_id, Postgres rows, and the -100xxxxxxxxxx form operators pass
+        # as SOURCE_CHAT.
+        chat_ids.append(telethon_utils.get_peer_id(entity))
 
     r = aioredis.from_url(settings.redis_url, decode_responses=True)
     queue = SignalQueue(r)
     quote_assets = settings.quote_assets_list
 
-    await catch_up(
-        client,
-        entity,
-        chat_id=chat_id,
-        queue=queue,
-        quote_assets=quote_assets,
-        limit=settings.catchup_limit,
-    )
+    for entity, chat_id in zip(entities, chat_ids, strict=True):
+        await catch_up(
+            client,
+            entity,
+            chat_id=chat_id,
+            queue=queue,
+            quote_assets=quote_assets,
+            limit=settings.catchup_limit,
+        )
 
-    @client.on(events.NewMessage(chats=entity))
+    @client.on(events.NewMessage(chats=entities))
     async def _on_new_message(event: events.NewMessage.Event) -> None:
+        chat_id = event.chat_id
         try:
             await handle_message(
                 event.message, chat_id=chat_id, queue=queue, quote_assets=quote_assets
@@ -158,9 +164,9 @@ async def async_main() -> None:
             log.warning("flood_wait", seconds=exc.seconds, context="live")
             await asyncio.sleep(exc.seconds)
         except Exception:
-            log.exception("message_handling_error", message_id=event.message.id)
+            log.exception("message_handling_error", chat_id=chat_id, message_id=event.message.id)
 
-    log.info("listener_started", source_chat=settings.source_chat, chat_id=chat_id)
+    log.info("listener_started", source_chats=settings.source_chats_list, chat_ids=chat_ids)
 
     heartbeat_task = asyncio.create_task(heartbeat_loop())
     try:

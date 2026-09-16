@@ -110,6 +110,12 @@ send there before you go any further.
 Fill in `SOURCE_CHAT` and `TARGET_CHAT` in `.env` using the dialog listings
 from step 5, then double-check the target:
 
+`SOURCE_CHAT` accepts more than one channel — comma-separated, e.g.
+`SOURCE_CHAT=-100111,-100222,@somechannel`. One listener watches all of them
+at once (no extra sessions or containers needed); signals from every source
+go through the same classifier, queue, and publisher, `CATCHUP_LIMIT` applies
+per source, and each source keeps its own catch-up checkpoint.
+
 ```bash
 make check-target
 ```
@@ -187,8 +193,10 @@ editing — copy it to `docker-compose.override.yml` to use it.
 
 - **Listener or publisher exits with `session_not_authorized` (code 2):** run
   `make login-listener` or `make login-publisher` respectively.
-- **Listener exits with code 3:** `SOURCE_CHAT` couldn't be resolved — check
-  the id/username and make sure the account is still a member.
+- **Listener exits with code 3:** one of the entries in `SOURCE_CHAT`
+  couldn't be resolved — check the `source_chat_unresolvable` log line for
+  which one, and make sure the account is still a member of it. With
+  multiple sources, all of them must resolve for the listener to start.
 - **Publisher exits with code 4 (`target_not_writable`):** the account can't
   send to `TARGET_CHAT` right now. Run `make check-target` for the specific
   reason, fix it (join the group, get unbanned, un-block the bot, switch off a
