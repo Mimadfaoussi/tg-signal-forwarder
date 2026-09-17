@@ -12,7 +12,7 @@ def _read(name: str) -> str:
 
 @pytest.mark.parametrize(
     "fixture",
-    ["signal_saga.txt", "signal_dash.txt", "signal_gps.txt"],
+    ["signal_saga.txt", "signal_dash.txt", "signal_gps.txt", "signal_arb.txt"],
 )
 def test_signal_fixtures_are_signals(fixture: str) -> None:
     assert is_signal(_read(fixture)) is True

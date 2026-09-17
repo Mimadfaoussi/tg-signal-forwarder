@@ -370,3 +370,29 @@ comma-separated list) was extracted into the shared, already-tested
 the wiring itself (multiple `get_entity` calls, looped catch-up, the event
 filter) was verified by building the actual listener image and constructing
 `ListenerSettings` with a multi-value `SOURCE_CHAT` inside the container.
+
+## A second channel format: "PAIR:"/"T1:"/"SL:" instead of "#"/"TP1:"/"Stop:"
+
+Adding a second source channel (Suhaib AlMashhadani) surfaced a signal format
+the classifier didn't recognize: `PAIR: ARB/USDT` instead of `#ARB/USDT`,
+`T1:`/`T2:` instead of `TP1:`/`TP2:`, and `SL:` instead of `Stop:`. Asked the
+operator whether to support exactly this second known format or loosen the
+patterns generally for whatever a future third channel might use; chose the
+former — precise, low false-positive risk, at the cost of needing another
+update if a third channel shows up with yet another style.
+
+`_build_pair_pattern()` now matches `#SYMBOL/QUOTE` OR `\bPAIR\s*:\s*SYMBOL/QUOTE`;
+the TP regex is `\bT(?:P)?\s*\d+\s*:\s*...` (matches `TP1:` via the literal
+"TP" branch, `T1:` via "T" with the optional "P" absent); the stop regex is
+`\b(?:Stop|SL)\s*:\s*...`. All three were checked against the *existing*
+update fixtures (`update_entry_hit.txt`, `update_tp_hit.txt`) to confirm the
+broadened patterns don't turn those into false positives — they still
+correctly classify as non-signals, since `\b` word-boundaries mean "T1:"-like
+patterns don't match inside words like "Time" or "GMT+3".
+
+One parsing detail worth noting: this channel's stop line has *two*
+parenthesised groups (`SL: 0.12685 (4h) (-5.34%)`, a duration then a signed
+P&L). The stop/TP regexes only capture the first parenthesised group as
+`stop_note`/`percent` — the second is simply left unmatched, not merged in or
+dropped-with-a-warning. Verified explicitly in
+`test_signal_arb_alternate_format` (`stop_note == "4h"`, not "4h) (-5.34").

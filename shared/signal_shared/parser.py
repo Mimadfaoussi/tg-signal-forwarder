@@ -10,14 +10,22 @@ from signal_shared.models import Signal, TakeProfit
 _DEFAULT_QUOTE_ASSETS = ["USDT"]
 
 _ENTRY_RE = re.compile(r"\bEntry\s*(\d+)?\s*:\s*([\d.]+)", re.IGNORECASE)
-_TP_RE = re.compile(r"\bTP\s*(\d+)\s*:\s*([\d.]+)\s*(?:\(\s*([\d.]+)\s*%\s*\))?", re.IGNORECASE)
-_STOP_RE = re.compile(r"\bStop\s*:\s*([\d.]+)\s*(?:\(([^)]*)\))?", re.IGNORECASE)
+# "TP1: 0.0185 (2.38%)" (AL-MAHWASHI style) or "T1: 0.14042 (4.79%)" (Suhaib
+# AlMashhadani style). Only the first parenthesised group is captured as the
+# percent -- a second one (e.g. a signed P&L like "(-5.34%)") is left alone.
+_TP_RE = re.compile(
+    r"\bT(?:P)?\s*(\d+)\s*:\s*([\d.]+)\s*(?:\(\s*([\d.]+)\s*%\s*\))?", re.IGNORECASE
+)
+# "Stop: 0.01043 (5m)" or "SL: 0.12685 (4h) (-5.34%)" -- same reasoning:
+# only the first parenthesised group becomes stop_note.
+_STOP_RE = re.compile(r"\b(?:Stop|SL)\s*:\s*([\d.]+)\s*(?:\(([^)]*)\))?", re.IGNORECASE)
 _DATE_RE = re.compile(r"\bDate\s*:\s*.*?(\d{4}-\d{2}-\d{2})", re.IGNORECASE)
 
 
 def _build_pair_pattern(quote_assets: list[str]) -> re.Pattern[str]:
     quotes = "|".join(re.escape(q) for q in quote_assets)
-    return re.compile(rf"#([A-Z0-9]{{2,15}})/({quotes})\b", re.IGNORECASE)
+    # Two known channel styles: "#SAGA/USDT" and "PAIR: ARB/USDT" (no #).
+    return re.compile(rf"(?:#|\bPAIR\s*:\s*)([A-Z0-9]{{2,15}})/({quotes})\b", re.IGNORECASE)
 
 
 def _normalize(text: str) -> str:

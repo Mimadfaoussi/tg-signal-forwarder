@@ -67,6 +67,28 @@ def test_signal_gps() -> None:
     assert signal.signal_date == date(2026, 9, 14)
 
 
+def test_signal_arb_alternate_format() -> None:
+    # "PAIR:" instead of "#", "T1"/"T2" instead of "TP1"/"TP2", "SL" instead
+    # of "Stop", and a second parenthesised group after SL that must NOT
+    # leak into stop_note.
+    signal = _parse(_read("signal_arb.txt"))
+
+    assert signal.parse_ok is True
+    assert signal.pair == "ARB/USDT"
+    assert signal.base == "ARB"
+    assert signal.quote == "USDT"
+    assert signal.entries == [Decimal("0.134"), Decimal("0.13026")]
+    assert len(signal.take_profits) == 6
+    assert [tp.index for tp in signal.take_profits] == [1, 2, 3, 4, 5, 6]
+    assert signal.take_profits[0].price == Decimal("0.14042")
+    assert signal.take_profits[0].percent == Decimal("4.79")
+    assert signal.take_profits[5].price == Decimal("0.1749")
+    assert signal.take_profits[5].percent == Decimal("30.52")
+    assert signal.stop == Decimal("0.12685")
+    assert signal.stop_note == "4h"
+    assert signal.signal_date == date(2026, 9, 15)
+
+
 def test_crlf_line_endings() -> None:
     text = "#SAGA/USDT\r\nEntry1: 0.01807\r\nTP1: 0.01850 (2.38%)\r\nStop: 0.01794\r\n"
     signal = _parse(text)

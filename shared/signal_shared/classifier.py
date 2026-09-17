@@ -5,12 +5,15 @@ import re
 
 def _build_pair_pattern(quote_assets: list[str]) -> re.Pattern[str]:
     quotes = "|".join(re.escape(q) for q in quote_assets)
-    return re.compile(rf"#[A-Z0-9]{{2,15}}/(?:{quotes})\b", re.IGNORECASE)
+    # Two known channel styles: "#SAGA/USDT" and "PAIR: ARB/USDT" (no #).
+    return re.compile(rf"(?:#|\bPAIR\s*:\s*)[A-Z0-9]{{2,15}}/(?:{quotes})\b", re.IGNORECASE)
 
 
 _ENTRY_RE = re.compile(r"\bEntry\s*1?\s*:\s*[\d.]+", re.IGNORECASE)
-_TP_RE = re.compile(r"\bTP\s*\d+\s*:\s*[\d.]+", re.IGNORECASE)
-_STOP_RE = re.compile(r"\bStop\s*:\s*[\d.]+", re.IGNORECASE)
+# "TP1:" (AL-MAHWASHI style) or "T1:" (Suhaib AlMashhadani style).
+_TP_RE = re.compile(r"\bT(?:P)?\s*\d+\s*:\s*[\d.]+", re.IGNORECASE)
+# "Stop:" or "SL:".
+_STOP_RE = re.compile(r"\b(?:Stop|SL)\s*:\s*[\d.]+", re.IGNORECASE)
 
 _DEFAULT_QUOTE_ASSETS = ["USDT"]
 
