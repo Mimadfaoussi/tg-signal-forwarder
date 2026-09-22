@@ -179,8 +179,8 @@ messages any other chat.
 
 ## Trade-volume limits
 
-Separate from the account-safety pacing above, two independent caps control
-trade *volume* rather than send *rate* — set either to `0` to disable it:
+Separate from the account-safety pacing above, three independent caps control
+trade *volume* rather than send *rate* — set any of them to `0` to disable it:
 
 - `MAX_TRADES_PER_DAY` (default 12) — resets at midnight in `TZ`. Once
   reached, further signals that day are skipped, not queued for tomorrow
@@ -192,10 +192,22 @@ trade *volume* rather than send *rate* — set either to `0` to disable it:
   accepts a fresh signal for a pair whose earlier trade already closed, so
   without this a busy day of signals can mean re-entering the same coin
   repeatedly.
+- `MAX_CONCURRENT_TRADES` (default 8) — caps how many trades can be open at
+  once, across all source channels. A slot opens the moment a signal is
+  forwarded (not waiting for the bot to confirm a fill — a pending limit
+  order still represents committed risk) and releases when the publisher
+  sees the execution bot post one of its closing messages back into
+  `TARGET_CHAT`: a TP sequence's final "All TPs filled", a stop-loss hit, a
+  manual cancellation, or a failed trade. The publisher watches `TARGET_CHAT`
+  for exactly these messages — nothing from there is ever acted on beyond
+  releasing the slot. If a slot's closing message is ever missed or doesn't
+  match a recognized pattern, it auto-releases after 7 days as a safety net
+  rather than permanently eating a slot.
 
-A signal skipped by either check gets `status='skipped'` in Postgres with the
-reason (`daily_cap` or `cooldown`) in `last_error` — visible via `make stats`
-or `make db-shell`, not silently dropped.
+A signal skipped by any of these checks gets `status='skipped'` in Postgres
+with the reason (`daily_cap`, `cooldown`, or `concurrent_cap`) in
+`last_error` — visible via `make stats` or `make db-shell`, not silently
+dropped.
 
 ## Development
 

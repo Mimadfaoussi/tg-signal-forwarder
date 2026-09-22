@@ -15,6 +15,7 @@ from signal_shared.logging import configure_logging, get_logger
 from signal_shared.models import Signal
 from signal_shared.settings import describe_config_error
 from signal_shared.telegram import make_client
+from telethon import events
 from telethon.errors import (
     AuthKeyDuplicatedError,
     AuthKeyUnregisteredError,
@@ -24,6 +25,7 @@ from telethon.errors import (
 )
 
 from publisher.health import heartbeat_loop
+from publisher.positions import PositionTracker, parse_close_event
 from publisher.ratelimit import RateLimiter
 from publisher.repository import SignalRepository, run_migrations
 from publisher.sender import (
@@ -84,6 +86,7 @@ async def process_entry(
     repo: SignalRepository,
     limiter: RateLimiter,
     trade_limits: TradeLimits,
+    positions: PositionTracker,
     settings: PublisherSettings,
 ) -> None:
     raw_payload = fields.get("payload")
@@ -108,6 +111,8 @@ async def process_entry(
         return
 
     skip_reason = await trade_limits.check(signal.pair)
+    if not skip_reason and signal.pair and await positions.is_at_capacity():
+        skip_reason = "concurrent_cap"
     if skip_reason:
         await repo.record_skipped(signal, reason=skip_reason)
         await r.xack(STREAM, GROUP, entry_id)
@@ -168,6 +173,8 @@ async def process_entry(
             attempts += 1
             await limiter.record_send()
             await trade_limits.record(signal.pair)
+            if signal.pair:
+                await positions.open(signal.pair)
             target_chat_id = getattr(message, "chat_id", None)
             await repo.record_sent(signal, target_chat_id, message.id, attempts=attempts)
             await r.xack(STREAM, GROUP, entry_id)
@@ -191,6 +198,7 @@ async def main_loop(
     repo: SignalRepository,
     limiter: RateLimiter,
     trade_limits: TradeLimits,
+    positions: PositionTracker,
     settings: PublisherSettings,
 ) -> None:
     consumer = socket.gethostname()
@@ -210,6 +218,7 @@ async def main_loop(
                         repo=repo,
                         limiter=limiter,
                         trade_limits=trade_limits,
+                        positions=positions,
                         settings=settings,
                     )
                 except PermanentSendError:
@@ -227,6 +236,7 @@ async def claim_loop(
     repo: SignalRepository,
     limiter: RateLimiter,
     trade_limits: TradeLimits,
+    positions: PositionTracker,
     settings: PublisherSettings,
 ) -> None:
     consumer = socket.gethostname()
@@ -250,6 +260,7 @@ async def claim_loop(
                             repo=repo,
                             limiter=limiter,
                             trade_limits=trade_limits,
+                            positions=positions,
                             settings=settings,
                         )
                     except PermanentSendError:
@@ -336,6 +347,18 @@ async def async_main() -> None:
         max_per_day=settings.max_trades_per_day,
         cooldown_hours=settings.pair_cooldown_hours,
     )
+    positions = PositionTracker(r, max_concurrent=settings.max_concurrent_trades)
+
+    # The execution bot posts trade status (fills, TP/SL hits, cancellations,
+    # failures) back into this same chat -- watch it to know when a slot this
+    # publisher opened has actually closed. Never acted on beyond releasing
+    # the slot; nothing here is ever forwarded anywhere.
+    @client.on(events.NewMessage(chats=target_entity))
+    async def _on_target_chat_message(event: events.NewMessage.Event) -> None:
+        pair = parse_close_event(event.raw_text)
+        if pair:
+            await positions.close(pair)
+            log.info("position_closed", pair=pair)
 
     log.info(
         "publisher_started",
@@ -343,12 +366,17 @@ async def async_main() -> None:
         dry_run=settings.dry_run,
         max_trades_per_day=settings.max_trades_per_day,
         pair_cooldown_hours=settings.pair_cooldown_hours,
+        max_concurrent_trades=settings.max_concurrent_trades,
     )
 
     tasks = [
         asyncio.create_task(heartbeat_loop()),
-        asyncio.create_task(main_loop(client, target, r, repo, limiter, trade_limits, settings)),
-        asyncio.create_task(claim_loop(client, target, r, repo, limiter, trade_limits, settings)),
+        asyncio.create_task(
+            main_loop(client, target, r, repo, limiter, trade_limits, positions, settings)
+        ),
+        asyncio.create_task(
+            claim_loop(client, target, r, repo, limiter, trade_limits, positions, settings)
+        ),
     ]
     try:
         await asyncio.gather(*tasks)

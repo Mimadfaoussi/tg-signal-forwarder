@@ -17,6 +17,7 @@ import pytest_asyncio
 import redis.asyncio as aioredis
 from publisher import main as publisher_main
 from publisher.main import TargetState
+from publisher.positions import PositionTracker
 from publisher.ratelimit import RateLimiter
 from publisher.repository import SignalRepository, run_migrations
 from publisher.tradelimits import TradeLimits
@@ -79,6 +80,11 @@ def make_trade_limits(r: aioredis.Redis) -> TradeLimits:
     return TradeLimits(r, max_per_day=0, cooldown_hours=0)
 
 
+def make_positions(r: aioredis.Redis) -> PositionTracker:
+    # Disabled here too, for the same reason (see test_positions.py).
+    return PositionTracker(r, max_concurrent=0)
+
+
 @pytest_asyncio.fixture
 async def pool():
     p = await asyncpg.create_pool(dsn=DATABASE_URL)
@@ -112,6 +118,7 @@ async def test_signal_is_delivered_once_and_recorded(pool: asyncpg.Pool, r: aior
     repo = SignalRepository(pool)
     limiter = make_limiter(r)
     trade_limits = make_trade_limits(r)
+    positions = make_positions(r)
     target = TargetState(entity="target-entity", slow_mode_delay=None)
 
     response = await r.xreadgroup(
@@ -130,6 +137,7 @@ async def test_signal_is_delivered_once_and_recorded(pool: asyncpg.Pool, r: aior
         repo=repo,
         limiter=limiter,
         trade_limits=trade_limits,
+        positions=positions,
         settings=FakeSettings(),
     )
 
@@ -166,6 +174,7 @@ async def test_restart_mid_flight_does_not_lose_or_duplicate(
     repo = SignalRepository(pool)
     limiter = make_limiter(r)
     trade_limits = make_trade_limits(r)
+    positions = make_positions(r)
     target = TargetState(entity="target-entity", slow_mode_delay=None)
 
     # "Restart": a new publisher process with the same consumer name re-reads
@@ -186,6 +195,7 @@ async def test_restart_mid_flight_does_not_lose_or_duplicate(
         repo=repo,
         limiter=limiter,
         trade_limits=trade_limits,
+        positions=positions,
         settings=FakeSettings(),
     )
 
@@ -205,6 +215,7 @@ async def test_restart_mid_flight_does_not_lose_or_duplicate(
         repo=repo,
         limiter=limiter,
         trade_limits=trade_limits,
+        positions=positions,
         settings=FakeSettings(),
     )
     assert client.call_count == 1

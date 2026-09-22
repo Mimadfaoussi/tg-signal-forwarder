@@ -20,9 +20,10 @@ class PublisherSettings(BaseAppSettings):
     max_flood_wait: int = 3600
 
     # Trade-volume limits (independent of the account-safety rate limiter
-    # above): 0 disables either check.
+    # above): 0 disables any of these checks.
     max_trades_per_day: int = 12
     pair_cooldown_hours: float = 24.0
+    max_concurrent_trades: int = 8
 
     database_url: str
 

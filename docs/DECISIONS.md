@@ -458,3 +458,67 @@ migration file twice in a row to confirm idempotency, (3) simulating the
 operator's exact upgrade path -- a table with only migration 001 applied,
 then invoking the app's own `run_migrations()` (not just running the SQL
 directly) to confirm it correctly reaches and applies 002.
+
+## Concurrent-open-trades cap, driven by the execution bot's own status messages
+
+The operator named this the most important of the three trade-volume limits.
+Unlike the daily cap and cooldown (pure bookkeeping we already had the data
+for), a *concurrent* cap needs to know when a trade actually closes -- which
+nothing in this system observed before. The operator's execution bot happens
+to post detailed status messages (fills, TP/SL hits, cancellations, failures)
+back into the same chat it's forwarded into (`TARGET_CHAT`), which the
+operator confirmed and provided real examples of. `publisher/positions.py`
+watches that chat via a second Telethon `events.NewMessage` handler on the
+publisher's existing client (no extra session, no extra container -- the
+client is already connected and reading `TARGET_CHAT` is just another
+subscription) and tracks open/closed state from it.
+
+### A slot opens at forward-time, not at fill confirmation
+
+Considered two options: open the slot only once the bot confirms a fill
+("Entry N filled"), or open it the moment *we* forward the signal. Chose the
+latter: a pending limit order still represents committed, earmarked risk,
+and waiting for confirmation would let a burst of signals slip past the cap
+before any fills (or non-fills) are confirmed -- exactly the kind of gap
+that would undermine "control how many trades are open at once," the
+operator's stated goal. This also means the cap logic never needed to parse
+"New Signal Detected" / "Entry filled" messages at all -- out of scope for
+this pass, revisit if/when per-channel P&L tracking needs them.
+
+### Closing events, and what does *not* close a slot
+
+Four message types release a slot (matched via `parse_close_event`, tested
+against the operator's exact real message examples in
+`tests/unit/test_positions.py`): a stop-loss hit, a TP-hit message that
+*also* contains "All TPs filled" (the bot puts this in the same message as
+the final TP, not a separate one), a manual cancellation, and a trade-failed
+message (never really opened, but still needs its reserved slot released).
+Two message types were deliberately tested to confirm they do *not* close a
+slot, since both are easy to mis-match against a TP-hit-shaped regex: an
+*intermediate* TP hit (e.g. TP1 of 5 -- position stays open) and the "🔁
+stop moved" notification the bot sends alongside a TP hit (superficially
+similar wording, no `✅`/`for X!` structure, purely informational).
+
+### Pair-matching between "ADA/USDT" and "ADAUSDT"
+
+Our own `Signal.pair` always has a slash; the execution bot's log messages
+never do. `normalize_pair()` strips everything but alphanumerics and
+uppercases before comparing, so `PositionTracker.open("ADA/USDT")` and
+`.close("ADAUSDT")` correctly refer to the same slot.
+
+### Storage: a Redis sorted set, reusing RateLimiter's existing pattern
+
+`publisher:positions:open`, member=normalized pair, score=opened_at --
+exactly `RateLimiter`'s rolling-hourly-window structure, reused here for a
+different reason: Redis sets don't support a per-member TTL, but a sorted
+set's score lets a periodic `ZREMRANGEBYSCORE` prune stale entries the same
+way. That prune is the safety net for a slot whose closing message is missed
+or doesn't match any recognized pattern (an unanticipated bot message
+format, a crash mid-way) -- it auto-releases after 7 days rather than
+permanently consuming a concurrent-trade slot forever.
+
+### No schema migration needed
+
+Reuses the `status='skipped'` value and `last_error`-as-reason convention
+already added for the daily cap / cooldown (reason: `concurrent_cap`) --
+exactly the extensibility that decision's rationale anticipated.
