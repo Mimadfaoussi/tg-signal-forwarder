@@ -19,6 +19,7 @@ from publisher import main as publisher_main
 from publisher.main import TargetState
 from publisher.ratelimit import RateLimiter
 from publisher.repository import SignalRepository, run_migrations
+from publisher.tradelimits import TradeLimits
 from signal_shared.parser import parse_signal
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
@@ -72,6 +73,12 @@ def make_limiter(r: aioredis.Redis) -> RateLimiter:
     return RateLimiter(r, min_interval=0.0, jitter=0.0, max_per_hour=1000, sleep=no_sleep)
 
 
+def make_trade_limits(r: aioredis.Redis) -> TradeLimits:
+    # Disabled here: this suite tests the Redis/Postgres pipeline, not the
+    # daily-cap/cooldown feature itself (see test_tradelimits.py for that).
+    return TradeLimits(r, max_per_day=0, cooldown_hours=0)
+
+
 @pytest_asyncio.fixture
 async def pool():
     p = await asyncpg.create_pool(dsn=DATABASE_URL)
@@ -104,6 +111,7 @@ async def test_signal_is_delivered_once_and_recorded(pool: asyncpg.Pool, r: aior
 
     repo = SignalRepository(pool)
     limiter = make_limiter(r)
+    trade_limits = make_trade_limits(r)
     target = TargetState(entity="target-entity", slow_mode_delay=None)
 
     response = await r.xreadgroup(
@@ -121,6 +129,7 @@ async def test_signal_is_delivered_once_and_recorded(pool: asyncpg.Pool, r: aior
         r=r,
         repo=repo,
         limiter=limiter,
+        trade_limits=trade_limits,
         settings=FakeSettings(),
     )
 
@@ -156,6 +165,7 @@ async def test_restart_mid_flight_does_not_lose_or_duplicate(
 
     repo = SignalRepository(pool)
     limiter = make_limiter(r)
+    trade_limits = make_trade_limits(r)
     target = TargetState(entity="target-entity", slow_mode_delay=None)
 
     # "Restart": a new publisher process with the same consumer name re-reads
@@ -175,6 +185,7 @@ async def test_restart_mid_flight_does_not_lose_or_duplicate(
         r=r,
         repo=repo,
         limiter=limiter,
+        trade_limits=trade_limits,
         settings=FakeSettings(),
     )
 
@@ -193,6 +204,7 @@ async def test_restart_mid_flight_does_not_lose_or_duplicate(
         r=r,
         repo=repo,
         limiter=limiter,
+        trade_limits=trade_limits,
         settings=FakeSettings(),
     )
     assert client.call_count == 1

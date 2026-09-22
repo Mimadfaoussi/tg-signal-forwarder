@@ -177,6 +177,26 @@ so a restart doesn't reset it. The publisher's only write action, ever, is
 `send_message` to `TARGET_CHAT` — nothing joins, leaves, forwards, reacts, or
 messages any other chat.
 
+## Trade-volume limits
+
+Separate from the account-safety pacing above, two independent caps control
+trade *volume* rather than send *rate* — set either to `0` to disable it:
+
+- `MAX_TRADES_PER_DAY` (default 12) — resets at midnight in `TZ`. Once
+  reached, further signals that day are skipped, not queued for tomorrow
+  (a trade signal delayed a day is stale).
+- `PAIR_COOLDOWN_HOURS` (default 24) — blocks forwarding another signal for
+  a pair that was already forwarded within this window, even if that
+  earlier trade already closed. This exists because the execution bot only
+  blocks a duplicate while the *same* trade is still open — it happily
+  accepts a fresh signal for a pair whose earlier trade already closed, so
+  without this a busy day of signals can mean re-entering the same coin
+  repeatedly.
+
+A signal skipped by either check gets `status='skipped'` in Postgres with the
+reason (`daily_cap` or `cooldown`) in `last_error` — visible via `make stats`
+or `make db-shell`, not silently dropped.
+
 ## Development
 
 ```bash

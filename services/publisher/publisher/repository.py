@@ -98,3 +98,6 @@ class SignalRepository:
 
     async def record_dry_run(self, signal: Signal, *, attempts: int = 0) -> None:
         await self._upsert(signal, status="dry_run", attempts=attempts)
+
+    async def record_skipped(self, signal: Signal, *, reason: str) -> None:
+        await self._upsert(signal, status="skipped", attempts=0, last_error=reason)

@@ -69,6 +69,17 @@ class FakeLimiter:
         self.sends += 1
 
 
+class FakeTradeLimits:
+    """A trade-limits double that always allows, for tests unrelated to the
+    daily-cap/cooldown feature (see test_tradelimits.py for that logic)."""
+
+    async def check(self, pair):
+        return None
+
+    async def record(self, pair):
+        pass
+
+
 class FakeMessage:
     def __init__(self, message_id: int, chat_id: int = -100999) -> None:
         self.id = message_id
@@ -119,6 +130,7 @@ def make_client(call_side_effect, *, response_message=None) -> AsyncMock:
 async def test_process_entry_success() -> None:
     client = make_client(["raw-result"], response_message=[FakeMessage(42)])
     r, repo, limiter = FakeRedis(), FakeRepository(), FakeLimiter()
+    trade_limits = FakeTradeLimits()
     target = TargetState(entity="target-entity", slow_mode_delay=None)
 
     await publisher_main.process_entry(
@@ -129,6 +141,7 @@ async def test_process_entry_success() -> None:
         r=r,
         repo=repo,
         limiter=limiter,
+        trade_limits=trade_limits,
         settings=FakeSettings(),
     )
 
@@ -146,6 +159,7 @@ async def test_flood_wait_retries_without_counting_as_an_attempt() -> None:
         response_message=[FakeMessage(7)],
     )
     r, repo, limiter = FakeRedis(), FakeRepository(), FakeLimiter()
+    trade_limits = FakeTradeLimits()
     target = TargetState(entity="target-entity", slow_mode_delay=None)
 
     await publisher_main.process_entry(
@@ -156,6 +170,7 @@ async def test_flood_wait_retries_without_counting_as_an_attempt() -> None:
         r=r,
         repo=repo,
         limiter=limiter,
+        trade_limits=trade_limits,
         settings=FakeSettings(),
     )
 
@@ -171,6 +186,7 @@ async def test_slow_mode_wait_retries_same_message() -> None:
         response_message=[FakeMessage(9)],
     )
     r, repo, limiter = FakeRedis(), FakeRepository(), FakeLimiter()
+    trade_limits = FakeTradeLimits()
     target = TargetState(entity="target-entity", slow_mode_delay=None)
 
     await publisher_main.process_entry(
@@ -181,6 +197,7 @@ async def test_slow_mode_wait_retries_same_message() -> None:
         r=r,
         repo=repo,
         limiter=limiter,
+        trade_limits=trade_limits,
         settings=FakeSettings(),
     )
 
@@ -192,6 +209,7 @@ async def test_slow_mode_wait_retries_same_message() -> None:
 async def test_connection_error_backs_off_then_dead_letters() -> None:
     client = make_client(ConnectionError("boom"))
     r, repo, limiter = FakeRedis(), FakeRepository(), FakeLimiter()
+    trade_limits = FakeTradeLimits()
     target = TargetState(entity="target-entity", slow_mode_delay=None)
 
     await publisher_main.process_entry(
@@ -202,6 +220,7 @@ async def test_connection_error_backs_off_then_dead_letters() -> None:
         r=r,
         repo=repo,
         limiter=limiter,
+        trade_limits=trade_limits,
         settings=FakeSettings(),
     )
 
@@ -215,6 +234,7 @@ async def test_connection_error_backs_off_then_dead_letters() -> None:
 async def test_chat_write_forbidden_does_not_retry_and_raises_permanent_error() -> None:
     client = make_client(ChatWriteForbiddenError(request=None))
     r, repo, limiter = FakeRedis(), FakeRepository(), FakeLimiter()
+    trade_limits = FakeTradeLimits()
     target = TargetState(entity="target-entity", slow_mode_delay=None)
 
     with pytest.raises(PermanentSendError):
@@ -226,6 +246,7 @@ async def test_chat_write_forbidden_does_not_retry_and_raises_permanent_error() 
             r=r,
             repo=repo,
             limiter=limiter,
+            trade_limits=trade_limits,
             settings=FakeSettings(),
         )
 
@@ -241,6 +262,7 @@ async def test_chat_forwards_restricted_does_not_retry_and_raises_permanent_erro
     # blocks forwarding via the API entirely -- no amount of retrying helps.
     client = make_client(ChatForwardsRestrictedError(request=None))
     r, repo, limiter = FakeRedis(), FakeRepository(), FakeLimiter()
+    trade_limits = FakeTradeLimits()
     target = TargetState(entity="target-entity", slow_mode_delay=None)
 
     with pytest.raises(PermanentSendError):
@@ -252,6 +274,7 @@ async def test_chat_forwards_restricted_does_not_retry_and_raises_permanent_erro
             r=r,
             repo=repo,
             limiter=limiter,
+            trade_limits=trade_limits,
             settings=FakeSettings(),
         )
 
@@ -265,6 +288,7 @@ async def test_chat_forwards_restricted_does_not_retry_and_raises_permanent_erro
 async def test_auth_key_duplicated_raises_and_leaves_message_pending() -> None:
     client = make_client(AuthKeyDuplicatedError(request=None))
     r, repo, limiter = FakeRedis(), FakeRepository(), FakeLimiter()
+    trade_limits = FakeTradeLimits()
     target = TargetState(entity="target-entity", slow_mode_delay=None)
 
     with pytest.raises(AuthRevoked):
@@ -276,6 +300,7 @@ async def test_auth_key_duplicated_raises_and_leaves_message_pending() -> None:
             r=r,
             repo=repo,
             limiter=limiter,
+            trade_limits=trade_limits,
             settings=FakeSettings(),
         )
 
@@ -291,6 +316,7 @@ async def test_duplicate_signal_id_skips_send() -> None:
     r = FakeRedis()
     repo = FakeRepository(existing_status="sent")
     limiter = FakeLimiter()
+    trade_limits = FakeTradeLimits()
     target = TargetState(entity="target-entity", slow_mode_delay=None)
 
     await publisher_main.process_entry(
@@ -301,6 +327,7 @@ async def test_duplicate_signal_id_skips_send() -> None:
         r=r,
         repo=repo,
         limiter=limiter,
+        trade_limits=trade_limits,
         settings=FakeSettings(),
     )
 
@@ -326,6 +353,7 @@ async def test_same_signal_uses_the_same_random_id_across_retries() -> None:
     client = AsyncMock(side_effect=capture_random_id)
     client.get_input_entity = AsyncMock(return_value="input-entity")
     r, repo, limiter = FakeRedis(), FakeRepository(), FakeLimiter()
+    trade_limits = FakeTradeLimits()
     target = TargetState(entity="target-entity", slow_mode_delay=None)
 
     await publisher_main.process_entry(
@@ -336,6 +364,7 @@ async def test_same_signal_uses_the_same_random_id_across_retries() -> None:
         r=r,
         repo=repo,
         limiter=limiter,
+        trade_limits=trade_limits,
         settings=FakeSettings(),
     )
 
@@ -401,10 +430,13 @@ async def test_claim_loop_reclaims_and_sends_a_pending_entry(
     client = make_client(["raw-result"], response_message=[FakeMessage(99)])
     repo = FakeRepository()
     limiter = FakeLimiter()
+    trade_limits = FakeTradeLimits()
     target = TargetState(entity="target-entity", slow_mode_delay=None)
 
     with pytest.raises(asyncio.CancelledError):
-        await publisher_main.claim_loop(client, target, r, repo, limiter, FakeSettings())
+        await publisher_main.claim_loop(
+            client, target, r, repo, limiter, trade_limits, FakeSettings()
+        )
 
     assert client.call_count == 1
     assert len(repo.sent) == 1

@@ -396,3 +396,65 @@ P&L). The stop/TP regexes only capture the first parenthesised group as
 `stop_note`/`percent` — the second is simply left unmatched, not merged in or
 dropped-with-a-warning. Verified explicitly in
 `test_signal_arb_alternate_format` (`stop_note == "4h"`, not "4h) (-5.34").
+
+## Trade-volume limits: daily cap and per-pair cooldown
+
+With 3 source channels and no volume limit, the operator hit 32 forwarded
+trades in one day (Sep 21), all correlated altcoin longs, including the same
+pair (PHA) re-entered 4 times. The operator confirmed the execution bot
+already blocks a *true* simultaneous duplicate (a second signal for a pair
+while that pair's trade is still open) — so PHA×4 could only have happened
+via the bot accepting a *fresh* PHA signal each time the *previous* PHA trade
+had already closed. That reframes "avoid duplicates" as a same-day re-entry
+cooldown, not a same-pair-while-open guard (already handled elsewhere) --
+confirmed with the operator before building it, since it's a real behavior
+change (a good new signal for a pair gets skipped if that pair already
+traded earlier that day, even after the earlier trade closed).
+
+Implemented as a new `publisher/tradelimits.py::TradeLimits`, deliberately
+separate from `ratelimit.py::RateLimiter` (§6.7) -- they're independent
+concerns (pacing vs. volume) with different natural units (rolling windows
+vs. calendar day / pair identity), and conflating them would make either
+harder to reason about. Two Redis-backed checks, either disabled by setting
+it to `0`:
+
+- **Daily cap** (`MAX_TRADES_PER_DAY`, default 12): a per-calendar-day
+  counter key. "Calendar day" is `clock().date()`, where the default clock is
+  `datetime.now()` -- deliberately relying on the container's `TZ` env var
+  (already configured stack-wide) for local-time conversion rather than
+  reimplementing timezone handling with `zoneinfo` in Python.
+- **Pair cooldown** (`PAIR_COOLDOWN_HOURS`, default 24): a per-pair Redis key
+  with a TTL, existence-checked. Blocks re-forwarding that pair until the TTL
+  expires, regardless of whether the earlier trade closed.
+
+A skip is a real, visible outcome, not a silent drop: `signals.status` gained
+a fifth value, `'skipped'`, with the reason (`daily_cap` / `cooldown`) reused
+from the existing `last_error` column rather than adding new columns per
+reason -- consistent with how `record_failed` already stores free-text
+reasons there, and leaves room for future skip reasons (e.g. a Phase-2
+concurrent-open cap) without further schema changes.
+
+Checks run before dry-run's branch (so `DRY_RUN=true` previews accurately
+reflect what would be skipped) but only `record()` (marking the pair
+cooling-down / incrementing the day's count) runs on the real send path --
+matching how dry-run already skips `RateLimiter.record_send()` too, so
+dry-run stays fully side-effect-free.
+
+### This is a live-production schema change: a real migration, not just editing 001_init.sql
+
+Earlier schema changes in this project (pre-launch) were made by directly
+editing `001_init.sql`, safe at the time since `CREATE TABLE IF NOT EXISTS`
+against an empty/nonexistent database picks up any edit. That stopped being
+true once the stack went live on the VPS with real data: `IF NOT EXISTS`
+is a no-op against a table that already exists, so editing 001's CHECK
+constraint text would do nothing on the already-running database while still
+affecting fresh installs -- a real correctness bug if it shipped that way.
+Added `002_add_skipped_status.sql` instead: `ALTER TABLE ... DROP CONSTRAINT
+IF EXISTS ... ADD CONSTRAINT ...` (idempotent -- safe to run every startup,
+per §6.5.1). Verified three ways before shipping, not just reasoned about:
+(1) the constraint's actual Postgres-assigned name (`signals_status_check`)
+confirmed against a real container rather than assumed, (2) running the
+migration file twice in a row to confirm idempotency, (3) simulating the
+operator's exact upgrade path -- a table with only migration 001 applied,
+then invoking the app's own `run_migrations()` (not just running the SQL
+directly) to confirm it correctly reaches and applies 002.

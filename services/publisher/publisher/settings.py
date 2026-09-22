@@ -19,6 +19,11 @@ class PublisherSettings(BaseAppSettings):
     max_sends_per_hour: int = 30
     max_flood_wait: int = 3600
 
+    # Trade-volume limits (independent of the account-safety rate limiter
+    # above): 0 disables either check.
+    max_trades_per_day: int = 12
+    pair_cooldown_hours: float = 24.0
+
     database_url: str
 
     @field_validator("target_topic_id", mode="before")

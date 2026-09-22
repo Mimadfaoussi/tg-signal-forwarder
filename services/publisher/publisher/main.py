@@ -34,6 +34,7 @@ from publisher.sender import (
     send_signal,
 )
 from publisher.settings import PublisherSettings
+from publisher.tradelimits import TradeLimits
 
 STREAM = "signals.raw"
 DEAD_STREAM = "signals.dead"
@@ -82,6 +83,7 @@ async def process_entry(
     r: aioredis.Redis,
     repo: SignalRepository,
     limiter: RateLimiter,
+    trade_limits: TradeLimits,
     settings: PublisherSettings,
 ) -> None:
     raw_payload = fields.get("payload")
@@ -103,6 +105,13 @@ async def process_entry(
     if status == "sent":
         await r.xack(STREAM, GROUP, entry_id)
         bound_log.info("duplicate_send_skipped")
+        return
+
+    skip_reason = await trade_limits.check(signal.pair)
+    if skip_reason:
+        await repo.record_skipped(signal, reason=skip_reason)
+        await r.xack(STREAM, GROUP, entry_id)
+        bound_log.info("signal_skipped", reason=skip_reason)
         return
 
     if settings.dry_run:
@@ -158,6 +167,7 @@ async def process_entry(
         else:
             attempts += 1
             await limiter.record_send()
+            await trade_limits.record(signal.pair)
             target_chat_id = getattr(message, "chat_id", None)
             await repo.record_sent(signal, target_chat_id, message.id, attempts=attempts)
             await r.xack(STREAM, GROUP, entry_id)
@@ -180,6 +190,7 @@ async def main_loop(
     r: aioredis.Redis,
     repo: SignalRepository,
     limiter: RateLimiter,
+    trade_limits: TradeLimits,
     settings: PublisherSettings,
 ) -> None:
     consumer = socket.gethostname()
@@ -198,6 +209,7 @@ async def main_loop(
                         r=r,
                         repo=repo,
                         limiter=limiter,
+                        trade_limits=trade_limits,
                         settings=settings,
                     )
                 except PermanentSendError:
@@ -214,6 +226,7 @@ async def claim_loop(
     r: aioredis.Redis,
     repo: SignalRepository,
     limiter: RateLimiter,
+    trade_limits: TradeLimits,
     settings: PublisherSettings,
 ) -> None:
     consumer = socket.gethostname()
@@ -236,6 +249,7 @@ async def claim_loop(
                             r=r,
                             repo=repo,
                             limiter=limiter,
+                            trade_limits=trade_limits,
                             settings=settings,
                         )
                     except PermanentSendError:
@@ -317,13 +331,24 @@ async def async_main() -> None:
         jitter=settings.send_jitter,
         max_per_hour=settings.max_sends_per_hour,
     )
+    trade_limits = TradeLimits(
+        r,
+        max_per_day=settings.max_trades_per_day,
+        cooldown_hours=settings.pair_cooldown_hours,
+    )
 
-    log.info("publisher_started", output_mode=settings.output_mode, dry_run=settings.dry_run)
+    log.info(
+        "publisher_started",
+        output_mode=settings.output_mode,
+        dry_run=settings.dry_run,
+        max_trades_per_day=settings.max_trades_per_day,
+        pair_cooldown_hours=settings.pair_cooldown_hours,
+    )
 
     tasks = [
         asyncio.create_task(heartbeat_loop()),
-        asyncio.create_task(main_loop(client, target, r, repo, limiter, settings)),
-        asyncio.create_task(claim_loop(client, target, r, repo, limiter, settings)),
+        asyncio.create_task(main_loop(client, target, r, repo, limiter, trade_limits, settings)),
+        asyncio.create_task(claim_loop(client, target, r, repo, limiter, trade_limits, settings)),
     ]
     try:
         await asyncio.gather(*tasks)
