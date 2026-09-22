@@ -1,7 +1,14 @@
+from decimal import Decimal
+
 import pytest
 import pytest_asyncio
 from fakeredis import aioredis as fakeaioredis
-from publisher.positions import PositionTracker, normalize_pair, parse_close_event
+from publisher.positions import (
+    ExecutionEvent,
+    PositionTracker,
+    normalize_pair,
+    parse_execution_event,
+)
 
 # Real execution-bot log messages the operator provided, verbatim.
 
@@ -58,7 +65,7 @@ SL_HIT = """
   Filled price : 0.2411
   Quantity     : 24.8
   Avg buy      : 0.24100000000000002
-  P&L          : +0.61 USDT (+1.02%)
+  P&L          : +0.15 USDT (+0.25%)
 """
 
 ALL_TPS_FILLED = """
@@ -86,42 +93,51 @@ def test_normalize_pair_matches_slash_and_no_slash_forms() -> None:
     assert normalize_pair("ADA/USDT") == normalize_pair("ADAUSDT") == "ADAUSDT"
 
 
-class TestParseCloseEvent:
-    def test_new_signal_detected_is_not_a_close(self) -> None:
-        assert parse_close_event(NEW_SIGNAL_DETECTED) is None
+class TestParseExecutionEvent:
+    def test_new_signal_detected_is_not_recognized(self) -> None:
+        assert parse_execution_event(NEW_SIGNAL_DETECTED) is None
 
-    def test_entry_limit_buys_placed_is_not_a_close(self) -> None:
-        assert parse_close_event(ENTRY_LIMIT_BUYS_PLACED) is None
+    def test_entry_limit_buys_placed_is_not_recognized(self) -> None:
+        assert parse_execution_event(ENTRY_LIMIT_BUYS_PLACED) is None
 
-    def test_entry_filled_is_not_a_close(self) -> None:
-        assert parse_close_event(ENTRY_FILLED) is None
+    def test_entry_filled_is_not_recognized(self) -> None:
+        assert parse_execution_event(ENTRY_FILLED) is None
 
-    def test_partial_tp_hit_is_not_a_close(self) -> None:
-        assert parse_close_event(TP1_HIT_PARTIAL) is None
-        assert parse_close_event(TP2_HIT_PARTIAL) is None
-
-    def test_stop_moved_notification_is_not_a_close(self) -> None:
-        assert parse_close_event(STOP_MOVED_NOTIFICATION) is None
-
-    def test_stop_loss_hit_closes(self) -> None:
-        assert parse_close_event(SL_HIT) == "ADAUSDT"
-
-    def test_all_tps_filled_closes(self) -> None:
-        assert parse_close_event(ALL_TPS_FILLED) == "KITEUSDT"
-
-    def test_manual_cancel_closes(self) -> None:
-        assert parse_close_event(MANUAL_CANCEL) == "PHAUSDT"
-
-    def test_trade_failed_closes_regardless_of_reason(self) -> None:
-        assert parse_close_event(TRADE_FAILED_SYMBOL) == "ZETAUSDT"
-        assert parse_close_event(TRADE_FAILED_BALANCE) == "MANTAUSDT"
+    def test_stop_moved_notification_is_not_recognized(self) -> None:
+        assert parse_execution_event(STOP_MOVED_NOTIFICATION) is None
 
     def test_none_and_empty_text(self) -> None:
-        assert parse_close_event(None) is None
-        assert parse_close_event("") is None
+        assert parse_execution_event(None) is None
+        assert parse_execution_event("") is None
 
-    def test_unrelated_text_is_not_a_close(self) -> None:
-        assert parse_close_event("Good morning!") is None
+    def test_unrelated_text_is_not_recognized(self) -> None:
+        assert parse_execution_event("Good morning!") is None
+
+    def test_partial_tp_hit_is_not_closing_but_has_pnl(self) -> None:
+        event = parse_execution_event(TP1_HIT_PARTIAL)
+        assert event == ExecutionEvent("ADAUSDT", False, Decimal("0.34"), "tp_hit")
+
+        event2 = parse_execution_event(TP2_HIT_PARTIAL)
+        assert event2 == ExecutionEvent("ADAUSDT", False, Decimal("0.61"), "tp_hit")
+
+    def test_stop_loss_hit_closes_with_pnl(self) -> None:
+        event = parse_execution_event(SL_HIT)
+        assert event == ExecutionEvent("ADAUSDT", True, Decimal("0.15"), "stop_loss")
+
+    def test_all_tps_filled_closes_with_pnl(self) -> None:
+        event = parse_execution_event(ALL_TPS_FILLED)
+        assert event == ExecutionEvent("KITEUSDT", True, Decimal("7.41"), "all_tps_filled")
+
+    def test_manual_cancel_closes_with_pnl(self) -> None:
+        event = parse_execution_event(MANUAL_CANCEL)
+        assert event == ExecutionEvent("PHAUSDT", True, Decimal("2.85"), "cancelled")
+
+    def test_trade_failed_closes_with_no_pnl(self) -> None:
+        event = parse_execution_event(TRADE_FAILED_SYMBOL)
+        assert event == ExecutionEvent("ZETAUSDT", True, None, "failed")
+
+        event2 = parse_execution_event(TRADE_FAILED_BALANCE)
+        assert event2 == ExecutionEvent("MANTAUSDT", True, None, "failed")
 
 
 @pytest_asyncio.fixture
@@ -140,39 +156,35 @@ class FakeClock:
 
 
 @pytest.mark.asyncio
-async def test_position_tracker_open_and_close(redis) -> None:
+async def test_open_and_capacity(redis) -> None:
     clock = FakeClock()
     tracker = PositionTracker(redis, max_concurrent=2, clock=clock)
 
     assert await tracker.is_at_capacity() is False
 
-    await tracker.open("ADA/USDT")
+    await tracker.open("ADA/USDT", "-1001:1")
     assert await tracker.is_at_capacity() is False
 
-    await tracker.open("PHA/USDT")
+    await tracker.open("PHA/USDT", "-1001:2")
     assert await tracker.is_at_capacity() is True
 
-    await tracker.close("ADAUSDT")  # bot's no-slash form releases the same slot
-    assert await tracker.is_at_capacity() is False
-
 
 @pytest.mark.asyncio
-async def test_position_tracker_disabled_when_zero(redis) -> None:
-    clock = FakeClock()
-    tracker = PositionTracker(redis, max_concurrent=0, clock=clock)
+async def test_disabled_when_zero(redis) -> None:
+    tracker = PositionTracker(redis, max_concurrent=0, clock=FakeClock())
 
     for i in range(10):
-        await tracker.open(f"PAIR{i}/USDT")
+        await tracker.open(f"PAIR{i}/USDT", f"-1001:{i}")
 
     assert await tracker.is_at_capacity() is False
 
 
 @pytest.mark.asyncio
-async def test_position_tracker_safety_net_expires_stale_slots(redis) -> None:
+async def test_safety_net_expires_stale_slots(redis) -> None:
     clock = FakeClock(start=1_000_000.0)
     tracker = PositionTracker(redis, max_concurrent=1, clock=clock)
 
-    await tracker.open("ADA/USDT")
+    await tracker.open("ADA/USDT", "-1001:1")
     assert await tracker.is_at_capacity() is True
 
     clock.now += 8 * 24 * 3600  # 8 days later: past the 7-day safety net
@@ -180,7 +192,76 @@ async def test_position_tracker_safety_net_expires_stale_slots(redis) -> None:
 
 
 @pytest.mark.asyncio
-async def test_closing_an_unopened_pair_is_a_safe_no_op(redis) -> None:
+async def test_partial_fill_accumulates_but_does_not_close(redis) -> None:
     tracker = PositionTracker(redis, max_concurrent=5, clock=FakeClock())
-    await tracker.close("NEVEROPENED/USDT")  # must not raise
+    await tracker.open("ADA/USDT", "-1001:1")
+
+    result = await tracker.apply_event(parse_execution_event(TP1_HIT_PARTIAL))
+
+    assert result is None
+    assert await tracker.is_at_capacity() is False  # still open, cap not hit at 1/5 anyway
+
+
+@pytest.mark.asyncio
+async def test_closing_event_sums_all_prior_partial_pnl(redis) -> None:
+    tracker = PositionTracker(redis, max_concurrent=5, clock=FakeClock())
+    await tracker.open("ADA/USDT", "-1001:1")
+
+    assert await tracker.apply_event(parse_execution_event(TP1_HIT_PARTIAL)) is None
+    assert await tracker.apply_event(parse_execution_event(TP2_HIT_PARTIAL)) is None
+
+    result = await tracker.apply_event(parse_execution_event(SL_HIT))
+
+    assert result is not None
+    assert result.signal_id == "-1001:1"
+    assert result.reason == "stop_loss"
+    # 0.34 (TP1) + 0.61 (TP2) + 0.15 (SL) = 1.10
+    assert result.pnl_usdt == Decimal("1.10")
+
+
+@pytest.mark.asyncio
+async def test_all_tps_filled_with_no_prior_partials(redis) -> None:
+    tracker = PositionTracker(redis, max_concurrent=5, clock=FakeClock())
+    await tracker.open("KITE/USDT", "-1002:5")
+
+    result = await tracker.apply_event(parse_execution_event(ALL_TPS_FILLED))
+
+    assert result is not None
+    assert result.signal_id == "-1002:5"
+    assert result.pnl_usdt == Decimal("7.41")
+    assert result.reason == "all_tps_filled"
+
+
+@pytest.mark.asyncio
+async def test_trade_failed_closes_with_no_pnl_but_releases_slot(redis) -> None:
+    tracker = PositionTracker(redis, max_concurrent=1, clock=FakeClock())
+    await tracker.open("ZETA/USDT", "-1003:9")
+    assert await tracker.is_at_capacity() is True
+
+    result = await tracker.apply_event(parse_execution_event(TRADE_FAILED_SYMBOL))
+
+    assert result is not None
+    assert result.signal_id == "-1003:9"
+    assert result.pnl_usdt is None
+    assert result.reason == "failed"
+    assert await tracker.is_at_capacity() is False
+
+
+@pytest.mark.asyncio
+async def test_closing_event_for_untracked_pair_is_a_safe_no_op(redis) -> None:
+    tracker = PositionTracker(redis, max_concurrent=5, clock=FakeClock())
+
+    result = await tracker.apply_event(parse_execution_event(SL_HIT))
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_slot_is_released_after_close(redis) -> None:
+    tracker = PositionTracker(redis, max_concurrent=1, clock=FakeClock())
+    await tracker.open("ADA/USDT", "-1001:1")
+    assert await tracker.is_at_capacity() is True
+
+    await tracker.apply_event(parse_execution_event(SL_HIT))
+
     assert await tracker.is_at_capacity() is False

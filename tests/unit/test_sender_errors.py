@@ -44,6 +44,7 @@ class FakeRepository:
         self.failed: list[tuple] = []
         self.dry_runs: list[Signal] = []
         self.skipped: list[tuple] = []
+        self.trade_outcomes: list[tuple] = []
 
     async def get_status(self, signal_id: str) -> str | None:
         return self.existing_status
@@ -59,6 +60,9 @@ class FakeRepository:
 
     async def record_skipped(self, signal, *, reason):
         self.skipped.append((signal, reason))
+
+    async def record_trade_outcome(self, signal_id, *, pnl_usdt, reason):
+        self.trade_outcomes.append((signal_id, pnl_usdt, reason))
 
 
 class FakeLimiter:
@@ -86,16 +90,17 @@ class FakeTradeLimits:
 
 class FakePositions:
     """A position-tracker double that's never at capacity, for tests
-    unrelated to the concurrent-cap feature (see test_positions.py)."""
+    unrelated to the concurrent-cap/P&L-linkage features (see
+    test_positions.py for those)."""
 
     async def is_at_capacity(self):
         return False
 
-    async def open(self, pair):
+    async def open(self, pair, signal_id):
         pass
 
-    async def close(self, pair):
-        pass
+    async def apply_event(self, event):
+        return None
 
 
 class FakeMessage:

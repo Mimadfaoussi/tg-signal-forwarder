@@ -143,7 +143,7 @@ can fail, e.g. `broadcast_channel_requires_admin`, `restricted_from_sending`,
 | `make restart` | Restart the whole stack |
 | `make check-target` | Re-run only the target preflight check |
 | `make dry-run` | Start with `DRY_RUN=true` — publisher logs what it *would* send instead of actually sending (the preflight still runs) |
-| `make stats` | Signal counts by status, plus stream lengths |
+| `make stats` | Signal counts by status, P&L per source channel, plus stream lengths |
 | `make replay-dead` | Move everything in `signals.dead` back to `signals.raw` for retry |
 | `make backup` | `pg_dump` + copies of both session files, into `backups/` |
 | `make db-shell` / `make redis-cli` | Open a shell into Postgres / Redis |
@@ -208,6 +208,20 @@ A signal skipped by any of these checks gets `status='skipped'` in Postgres
 with the reason (`daily_cap`, `cooldown`, or `concurrent_cap`) in
 `last_error` — visible via `make stats` or `make db-shell`, not silently
 dropped.
+
+## Per-channel profit tracking
+
+The same closing messages that release a `MAX_CONCURRENT_TRADES` slot also
+get linked back to the signal that opened the trade: once the execution bot
+posts a TP-final, stop-loss, cancellation, or failure message for a pair,
+the publisher writes the cumulative P&L (summed across every partial fill
+along the way), a `trade_closed_reason`, and a `trade_closed_at` timestamp
+onto that signal's row — `realized_pnl_usdt` is `NULL` until the trade
+actually closes, and stays `NULL` forever for a `failed` trade. Since every
+signal already carries its `source_chat_id`, `make stats` breaks this down
+per channel: wins, losses, and total P&L — which is what makes it possible
+to see a specific source channel is a net loser and drop it from
+`SOURCE_CHAT`.
 
 ## Development
 

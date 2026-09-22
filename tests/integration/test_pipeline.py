@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
@@ -17,7 +18,7 @@ import pytest_asyncio
 import redis.asyncio as aioredis
 from publisher import main as publisher_main
 from publisher.main import TargetState
-from publisher.positions import PositionTracker
+from publisher.positions import PositionTracker, parse_execution_event
 from publisher.ratelimit import RateLimiter
 from publisher.repository import SignalRepository, run_migrations
 from publisher.tradelimits import TradeLimits
@@ -152,6 +153,83 @@ async def test_signal_is_delivered_once_and_recorded(pool: asyncpg.Pool, r: aior
 
     pending = await r.xpending(publisher_main.STREAM, publisher_main.GROUP)
     assert pending["pending"] == 0
+
+
+@pytest.mark.asyncio
+async def test_trade_outcome_is_linked_back_to_the_originating_signal(
+    pool: asyncpg.Pool, r: aioredis.Redis
+) -> None:
+    """End-to-end against real Redis + Postgres: a signal gets sent, a position
+    slot opens for its pair, the execution bot's TP-hit and final SL-hit
+    messages accumulate P&L, and closing releases the slot AND persists the
+    final P&L onto the *same* signal row -- what `make stats` reads per channel.
+    """
+    client = make_client(303)
+    entry_id = await r.xadd(publisher_main.STREAM, _make_fields("signal_saga.txt", "-1001:9"))
+
+    repo = SignalRepository(pool)
+    limiter = make_limiter(r)
+    trade_limits = make_trade_limits(r)
+    positions = PositionTracker(r, max_concurrent=5)
+    target = TargetState(entity="target-entity", slow_mode_delay=None)
+
+    response = await r.xreadgroup(
+        publisher_main.GROUP, "publisher-pnl-test", {publisher_main.STREAM: ">"}, count=1
+    )
+    [(_, entries)] = response
+    [(delivered_id, fields)] = entries
+    assert delivered_id == entry_id
+
+    await publisher_main.process_entry(
+        delivered_id,
+        fields,
+        client=client,
+        target=target,
+        r=r,
+        repo=repo,
+        limiter=limiter,
+        trade_limits=trade_limits,
+        positions=positions,
+        settings=FakeSettings(),
+    )
+
+    assert await positions.is_at_capacity() is False  # 1/5, not yet at cap
+    async with pool.acquire() as conn:
+        status = await conn.fetchval("SELECT status FROM signals WHERE signal_id = $1", "-1001:9")
+    assert status == "sent"
+
+    # A partial TP hit: accumulates P&L but does not close the slot or touch Postgres.
+    partial = parse_execution_event(
+        "✅ TP1 hit for SAGAUSDT!\n  P&L          : +0.50 USDT (+1.10%)\n"
+        "  Remaining : 2 TP(s) still open"
+    )
+    assert await positions.apply_event(partial) is None
+
+    # The final closing event: releases the slot and returns what to persist.
+    closing = parse_execution_event(
+        "🔴 Stop Loss hit for SAGAUSDT!\n  P&L          : +0.20 USDT (+0.44%)"
+    )
+    closed = await positions.apply_event(closing)
+    assert closed is not None
+    assert closed.signal_id == "-1001:9"
+    assert closed.pnl_usdt == Decimal("0.70")  # 0.50 (TP1) + 0.20 (SL) accumulated
+    assert closed.reason == "stop_loss"
+
+    await repo.record_trade_outcome(
+        closed.signal_id, pnl_usdt=closed.pnl_usdt, reason=closed.reason
+    )
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT status, realized_pnl_usdt, trade_closed_reason, trade_closed_at "
+            "FROM signals WHERE signal_id = $1",
+            "-1001:9",
+        )
+    assert row["status"] == "sent"  # the send outcome is untouched by the trade outcome
+    assert row["realized_pnl_usdt"] == Decimal("0.70")
+    assert row["trade_closed_reason"] == "stop_loss"
+    assert row["trade_closed_at"] is not None
+    assert await positions.is_at_capacity() is False
 
 
 @pytest.mark.asyncio

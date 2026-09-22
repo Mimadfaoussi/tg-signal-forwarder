@@ -522,3 +522,72 @@ permanently consuming a concurrent-trade slot forever.
 Reuses the `status='skipped'` value and `last_error`-as-reason convention
 already added for the daily cap / cooldown (reason: `concurrent_cap`) --
 exactly the extensibility that decision's rationale anticipated.
+
+## Per-channel P&L: linking a trade's outcome back to its signal
+
+The operator's next ask, building directly on the concurrent-trades cap
+above: "Link each trade's result back to its channel... store the final
+P&L on the forwarded signal. Then make stats can show profit per channel.
+That's what lets us drop the weak channel later." The cap already parses
+every closing message and already knows which `signal_id` opened each
+slot (`SIGNAL_KEY`) -- the missing piece was extracting *how much* and
+persisting it onto that signal's existing Postgres row rather than
+discarding it once the slot released.
+
+### Widening `parse_close_event` into `parse_execution_event`
+
+The old function returned just a pair (enough to know *which* slot to
+release). It's replaced with `parse_execution_event`, which returns a
+richer `ExecutionEvent` (pair, whether this event is closing, an extracted
+P&L figure, and a reason string) so the same regex match that used to only
+release a slot can now also carry the number to persist. This also let a
+*partial* TP hit (previously invisible to `positions.py` entirely, since
+it isn't a closing event) start contributing to the running total: a
+trade's real profit is the sum across every partial fill, not just
+whatever's in the final closing message.
+
+### `HINCRBYFLOAT` for the running total, `Decimal` at the boundary
+
+Each partial or closing event's P&L accumulates into a `publisher:positions:pnl`
+Redis hash via `HINCRBYFLOAT`, keyed by normalized pair -- mirroring the
+existing `SIGNAL_KEY` hash pattern. Confirmed empirically that
+`HINCRBYFLOAT` produces IEEE-754 float noise (`0.34 + 0.61` reads back as
+`0.94999999999999996`, not `0.95`), so the value is only ever read back
+through Python `Decimal` conversion with `.quantize(Decimal("0.00000001"))`
+at the one point it crosses back out of Redis (`PositionTracker.apply_event`)
+-- Redis itself never sees a `Decimal`, only floats, which is fine since
+nothing does arithmetic on the *stored* Redis value directly.
+
+### `apply_event` replaces `open`/`close` as the single write path
+
+`PositionTracker.open(pair, signal_id)` now also records which signal
+opened the slot (previously only the pair was tracked, since nothing
+downstream needed to look it up again). `close(pair)` is gone; every
+event -- partial or closing -- now goes through `apply_event`, which
+accumulates P&L unconditionally and only tears down the position (all
+three Redis structures: the open-slots sorted set, the signal-id hash,
+and the P&L hash) when the event is a closing one. It returns a
+`ClosedPosition` (signal_id, total pnl, reason) exactly when there's
+something to persist -- `None` for a partial fill, or for a closing event
+on a pair this tracker never opened (already cleaned up, or predates a
+restart within the 7-day safety net).
+
+### An UPDATE, not another upsert
+
+`SignalRepository.record_trade_outcome()` is a plain `UPDATE ... WHERE
+signal_id = $1`, unlike every other repository method which goes through
+the generic `_upsert()`. Deliberate: a trade outcome only ever applies to
+a row that must already exist (`record_sent` already inserted it when the
+signal was forwarded), and re-running `_upsert()`'s full column set here
+would risk clobbering `status`/`target_message_id`/etc. with stale values
+from a stale in-memory `Signal` object -- the trade-outcome columns are
+the only fields this path should ever touch.
+
+### `realized_pnl_usdt` stays `NULL` for a failed trade
+
+A `failed` execution event has no `P&L:` line to parse (the bot never
+opened a position), so `record_trade_outcome` is called with
+`pnl_usdt=None`. `trade_closed_reason='failed'` and `trade_closed_at` are
+still set, so `make stats`'s per-channel breakdown can count failures
+separately from wins/losses rather than a failed trade silently
+disappearing or masquerading as a $0 trade.

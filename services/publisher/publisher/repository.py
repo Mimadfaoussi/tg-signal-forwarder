@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from pathlib import Path
 
 import asyncpg
@@ -101,3 +102,22 @@ class SignalRepository:
 
     async def record_skipped(self, signal: Signal, *, reason: str) -> None:
         await self._upsert(signal, status="skipped", attempts=0, last_error=reason)
+
+    async def record_trade_outcome(
+        self, signal_id: str, *, pnl_usdt: Decimal | None, reason: str
+    ) -> None:
+        """Records how a previously-sent signal's trade closed, keyed off the
+        execution bot's status messages -- an UPDATE, not an upsert, since
+        the row must already exist from the original send.
+        """
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE signals
+                SET realized_pnl_usdt = $2, trade_closed_reason = $3, trade_closed_at = now()
+                WHERE signal_id = $1
+                """,
+                signal_id,
+                pnl_usdt,
+                reason,
+            )

@@ -25,7 +25,7 @@ from telethon.errors import (
 )
 
 from publisher.health import heartbeat_loop
-from publisher.positions import PositionTracker, parse_close_event
+from publisher.positions import PositionTracker, parse_execution_event
 from publisher.ratelimit import RateLimiter
 from publisher.repository import SignalRepository, run_migrations
 from publisher.sender import (
@@ -174,7 +174,7 @@ async def process_entry(
             await limiter.record_send()
             await trade_limits.record(signal.pair)
             if signal.pair:
-                await positions.open(signal.pair)
+                await positions.open(signal.pair, signal.signal_id)
             target_chat_id = getattr(message, "chat_id", None)
             await repo.record_sent(signal, target_chat_id, message.id, attempts=attempts)
             await r.xack(STREAM, GROUP, entry_id)
@@ -355,10 +355,21 @@ async def async_main() -> None:
     # the slot; nothing here is ever forwarded anywhere.
     @client.on(events.NewMessage(chats=target_entity))
     async def _on_target_chat_message(event: events.NewMessage.Event) -> None:
-        pair = parse_close_event(event.raw_text)
-        if pair:
-            await positions.close(pair)
-            log.info("position_closed", pair=pair)
+        exec_event = parse_execution_event(event.raw_text)
+        if exec_event is None:
+            return
+        closed = await positions.apply_event(exec_event)
+        if closed:
+            await repo.record_trade_outcome(
+                closed.signal_id, pnl_usdt=closed.pnl_usdt, reason=closed.reason
+            )
+            log.info(
+                "position_closed",
+                pair=exec_event.pair,
+                signal_id=closed.signal_id,
+                pnl_usdt=str(closed.pnl_usdt) if closed.pnl_usdt is not None else None,
+                reason=closed.reason,
+            )
 
     log.info(
         "publisher_started",

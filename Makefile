@@ -116,9 +116,18 @@ redis-cli: ## Open a redis-cli shell into redis
 	$(COMPOSE) exec redis redis-cli
 
 .PHONY: stats
-stats: ## Print signal counts by status and stream lengths
+stats: ## Print signal counts by status, P&L per source channel, and stream lengths
 	@$(COMPOSE) exec postgres psql -U $${POSTGRES_USER:-forwarder} -d $${POSTGRES_DB:-forwarder} \
 		-c "SELECT status, count(*) FROM signals GROUP BY status;"
+	@$(COMPOSE) exec postgres psql -U $${POSTGRES_USER:-forwarder} -d $${POSTGRES_DB:-forwarder} \
+		-c "SELECT source_chat_id, \
+		    count(*) FILTER (WHERE trade_closed_reason IS NOT NULL AND trade_closed_reason != 'failed') AS closed, \
+		    count(*) FILTER (WHERE trade_closed_reason = 'failed') AS failed, \
+		    count(*) FILTER (WHERE realized_pnl_usdt > 0) AS wins, \
+		    count(*) FILTER (WHERE realized_pnl_usdt < 0) AS losses, \
+		    round(coalesce(sum(realized_pnl_usdt), 0), 2) AS total_pnl_usdt \
+		    FROM signals WHERE trade_closed_at IS NOT NULL \
+		    GROUP BY source_chat_id ORDER BY total_pnl_usdt DESC;"
 	@$(COMPOSE) exec redis redis-cli XLEN signals.raw
 	@$(COMPOSE) exec redis redis-cli XLEN signals.dead
 
