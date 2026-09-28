@@ -591,3 +591,24 @@ opened a position), so `record_trade_outcome` is called with
 still set, so `make stats`'s per-channel breakdown can count failures
 separately from wins/losses rather than a failed trade silently
 disappearing or masquerading as a $0 trade.
+
+## Per-channel daily cap
+
+Operator request: `MAX_TRADES_PER_CHANNEL_PER_DAY` -- "if I set it to 5, I
+can't take more than 5 signals from each channel." The global
+`MAX_TRADES_PER_DAY` is first-come-first-served, so one chatty channel can
+exhaust the day's allowance before a quieter one gets a signal.
+
+- Implemented inside `TradeLimits` (same Redis counter pattern as the daily
+  cap): key `publisher:trades:channel_daily:{date}:{source_chat_id}`, 2-day
+  TTL, calendar day from the container's `TZ`. `check()`/`record()` take an
+  optional `source_chat_id`, so existing callers and tests are unaffected.
+- Check order: global daily cap, then channel cap, then pair cooldown. When
+  several would block, the broadest limit is the reason recorded. Skip
+  reason: `channel_daily_cap` (`status='skipped'`, in `last_error`).
+- Default 0 (disabled) so upgrading changes no behavior until the operator
+  opts in. Counts *forwarded* signals only (incremented on successful send),
+  same as the global cap.
+- Known tradeoff: keeps a channel's first N signals of the day, not the best
+  N; there's no quality signal to rank by at forward time.
+- No schema migration: reuses `status='skipped'` and `last_error`.

@@ -3,7 +3,12 @@ from datetime import datetime
 import pytest
 import pytest_asyncio
 from fakeredis import aioredis as fakeaioredis
-from publisher.tradelimits import REASON_COOLDOWN, REASON_DAILY_CAP, TradeLimits
+from publisher.tradelimits import (
+    REASON_CHANNEL_DAILY_CAP,
+    REASON_COOLDOWN,
+    REASON_DAILY_CAP,
+    TradeLimits,
+)
 
 
 class FakeClock:
@@ -21,8 +26,14 @@ async def redis():
     await r.aclose()
 
 
-def make_limits(redis, clock, *, max_per_day=3, cooldown_hours=24.0):
-    return TradeLimits(redis, max_per_day=max_per_day, cooldown_hours=cooldown_hours, clock=clock)
+def make_limits(redis, clock, *, max_per_day=3, cooldown_hours=24.0, max_per_channel=0):
+    return TradeLimits(
+        redis,
+        max_per_day=max_per_day,
+        cooldown_hours=cooldown_hours,
+        max_per_channel_per_day=max_per_channel,
+        clock=clock,
+    )
 
 
 @pytest.mark.asyncio
@@ -126,3 +137,49 @@ async def test_daily_cap_checked_before_cooldown(redis) -> None:
     await limits.record("PHA/USDT")
 
     assert await limits.check("PHA/USDT") == REASON_DAILY_CAP
+
+
+@pytest.mark.asyncio
+async def test_channel_cap_blocks_only_the_channel_that_hit_it(redis) -> None:
+    clock = FakeClock(datetime(2026, 9, 22, 10, 0))
+    limits = make_limits(redis, clock, max_per_day=0, cooldown_hours=0, max_per_channel=2)
+
+    await limits.record("A/USDT", -1001)
+    assert await limits.check("B/USDT", -1001) is None
+    await limits.record("B/USDT", -1001)
+
+    assert await limits.check("C/USDT", -1001) == REASON_CHANNEL_DAILY_CAP
+    assert await limits.check("C/USDT", -1002) is None  # another channel is unaffected
+
+
+@pytest.mark.asyncio
+async def test_channel_cap_resets_on_a_new_calendar_day(redis) -> None:
+    clock = FakeClock(datetime(2026, 9, 22, 23, 0))
+    limits = make_limits(redis, clock, max_per_day=0, cooldown_hours=0, max_per_channel=1)
+
+    await limits.record("A/USDT", -1001)
+    assert await limits.check("B/USDT", -1001) == REASON_CHANNEL_DAILY_CAP
+
+    clock.now = datetime(2026, 9, 23, 0, 5)
+    assert await limits.check("B/USDT", -1001) is None
+
+
+@pytest.mark.asyncio
+async def test_channel_cap_disabled_when_zero(redis) -> None:
+    clock = FakeClock(datetime(2026, 9, 22, 10, 0))
+    limits = make_limits(redis, clock, max_per_day=0, cooldown_hours=0, max_per_channel=0)
+
+    for i in range(10):
+        await limits.record(f"PAIR{i}/USDT", -1001)
+
+    assert await limits.check("ANOTHER/USDT", -1001) is None
+
+
+@pytest.mark.asyncio
+async def test_global_cap_is_reported_before_channel_cap(redis) -> None:
+    clock = FakeClock(datetime(2026, 9, 22, 10, 0))
+    limits = make_limits(redis, clock, max_per_day=1, cooldown_hours=0, max_per_channel=1)
+
+    await limits.record("A/USDT", -1001)
+
+    assert await limits.check("B/USDT", -1001) == REASON_DAILY_CAP

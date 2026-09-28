@@ -179,12 +179,18 @@ messages any other chat.
 
 ## Trade-volume limits
 
-Separate from the account-safety pacing above, three independent caps control
+Separate from the account-safety pacing above, four independent caps control
 trade *volume* rather than send *rate* — set any of them to `0` to disable it:
 
 - `MAX_TRADES_PER_DAY` (default 12) — resets at midnight in `TZ`. Once
   reached, further signals that day are skipped, not queued for tomorrow
   (a trade signal delayed a day is stale).
+- `MAX_TRADES_PER_CHANNEL_PER_DAY` (default 0, disabled) — the same daily cap
+  but counted per source channel: set to 5 and no single channel can get more
+  than 5 signals forwarded that day, so one chatty channel can't use up the
+  whole `MAX_TRADES_PER_DAY` allowance. It keeps a channel's *first* N
+  signals of the day, not its best N. Resets at midnight in `TZ`; the
+  global cap is checked first, so whichever limit is hit first wins.
 - `PAIR_COOLDOWN_HOURS` (default 24) — blocks forwarding another signal for
   a pair that was already forwarded within this window, even if that
   earlier trade already closed. This exists because the execution bot only
@@ -205,7 +211,7 @@ trade *volume* rather than send *rate* — set any of them to `0` to disable it:
   rather than permanently eating a slot.
 
 A signal skipped by any of these checks gets `status='skipped'` in Postgres
-with the reason (`daily_cap`, `cooldown`, or `concurrent_cap`) in
+with the reason (`daily_cap`, `channel_daily_cap`, `cooldown`, or `concurrent_cap`) in
 `last_error` — visible via `make stats` or `make db-shell`, not silently
 dropped.
 

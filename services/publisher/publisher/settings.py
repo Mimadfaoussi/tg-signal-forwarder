@@ -22,6 +22,7 @@ class PublisherSettings(BaseAppSettings):
     # Trade-volume limits (independent of the account-safety rate limiter
     # above): 0 disables any of these checks.
     max_trades_per_day: int = 12
+    max_trades_per_channel_per_day: int = 0
     pair_cooldown_hours: float = 24.0
     max_concurrent_trades: int = 8
 

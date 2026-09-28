@@ -81,10 +81,10 @@ class FakeTradeLimits:
     """A trade-limits double that always allows, for tests unrelated to the
     daily-cap/cooldown feature (see test_tradelimits.py for that logic)."""
 
-    async def check(self, pair):
+    async def check(self, pair, source_chat_id=None):
         return None
 
-    async def record(self, pair):
+    async def record(self, pair, source_chat_id=None):
         pass
 
 

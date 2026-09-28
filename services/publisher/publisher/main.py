@@ -110,7 +110,7 @@ async def process_entry(
         bound_log.info("duplicate_send_skipped")
         return
 
-    skip_reason = await trade_limits.check(signal.pair)
+    skip_reason = await trade_limits.check(signal.pair, signal.source_chat_id)
     if not skip_reason and signal.pair and await positions.is_at_capacity():
         skip_reason = "concurrent_cap"
     if skip_reason:
@@ -172,7 +172,7 @@ async def process_entry(
         else:
             attempts += 1
             await limiter.record_send()
-            await trade_limits.record(signal.pair)
+            await trade_limits.record(signal.pair, signal.source_chat_id)
             if signal.pair:
                 await positions.open(signal.pair, signal.signal_id)
             target_chat_id = getattr(message, "chat_id", None)
@@ -346,6 +346,7 @@ async def async_main() -> None:
         r,
         max_per_day=settings.max_trades_per_day,
         cooldown_hours=settings.pair_cooldown_hours,
+        max_per_channel_per_day=settings.max_trades_per_channel_per_day,
     )
     positions = PositionTracker(r, max_concurrent=settings.max_concurrent_trades)
 
@@ -376,6 +377,7 @@ async def async_main() -> None:
         output_mode=settings.output_mode,
         dry_run=settings.dry_run,
         max_trades_per_day=settings.max_trades_per_day,
+        max_trades_per_channel_per_day=settings.max_trades_per_channel_per_day,
         pair_cooldown_hours=settings.pair_cooldown_hours,
         max_concurrent_trades=settings.max_concurrent_trades,
     )
