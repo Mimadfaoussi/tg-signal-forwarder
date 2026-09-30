@@ -215,6 +215,27 @@ with the reason (`daily_cap`, `channel_daily_cap`, `cooldown`, or `concurrent_ca
 `last_error` — visible via `make stats` or `make db-shell`, not silently
 dropped.
 
+## Sharing a copy with someone else
+
+`FRIEND_CHAT` (optional, blank disables it) sends a copy of **every**
+incoming signal to a second chat — none of the trade-volume limits above
+apply to it: no daily cap, no per-channel cap, no cooldown, no concurrent
+cap, and it isn't blocked by the dedup check that skips an already-sent
+signal on a redelivery. It follows `OUTPUT_MODE` the same way `TARGET_CHAT`
+does (a real forward in `copy` mode, a composed message in `template` mode),
+and is silently skipped while `DRY_RUN=true`, same as the real send.
+
+This is deliberately best-effort: if it fails (the account can't write
+there, a transient Telegram error, anything), it's logged as
+`friend_copy_failed` and otherwise ignored — never retried, never
+dead-lettered, and never allowed to block or delay the real send to
+`TARGET_CHAT`. At startup, if `FRIEND_CHAT` can't be resolved or isn't
+writable, the publisher logs `friend_chat_not_writable` and keeps running
+with the friend-copy disabled for that run, rather than exiting like it
+does for `TARGET_CHAT`. It shares the same account-safety pacing
+(`MIN_SEND_INTERVAL`/`SEND_JITTER`/`MAX_SENDS_PER_HOUR`) as the real send,
+since it's the same Telegram account doing the sending either way.
+
 ## Per-channel profit tracking
 
 The same closing messages that release a `MAX_CONCURRENT_TRADES` slot also

@@ -14,6 +14,10 @@ class PublisherSettings(BaseAppSettings):
     output_mode: str = "copy"
     dry_run: bool = False
 
+    # Optional: every incoming signal is also copied here, unconditionally --
+    # none of the trade-volume limits below apply to it. Blank/unset disables it.
+    friend_chat: str | None = None
+
     min_send_interval: float = 5.0
     send_jitter: float = 2.0
     max_sends_per_hour: int = 30

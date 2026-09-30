@@ -410,6 +410,175 @@ async def test_concurrent_cap_skips_send_and_records_reason() -> None:
 
 
 @pytest.mark.asyncio
+async def test_friend_copy_sent_alongside_main_send() -> None:
+    client = make_client(["raw-result", "friend-raw-result"], response_message=[FakeMessage(42)])
+    r, repo, limiter = FakeRedis(), FakeRepository(), FakeLimiter()
+    trade_limits = FakeTradeLimits()
+    positions = FakePositions()
+    target = TargetState(entity="target-entity", slow_mode_delay=None)
+
+    await publisher_main.process_entry(
+        "1-0",
+        make_signal_fields(),
+        client=client,
+        target=target,
+        r=r,
+        repo=repo,
+        limiter=limiter,
+        trade_limits=trade_limits,
+        positions=positions,
+        settings=FakeSettings(),
+        friend_target="friend-entity",
+    )
+
+    assert client.call_count == 2  # main send + friend copy
+    assert len(repo.sent) == 1  # only the main send is recorded in Postgres
+    assert limiter.sends == 2  # both share the account-safety send budget
+
+
+@pytest.mark.asyncio
+async def test_friend_copy_uses_a_different_random_id_than_the_main_send() -> None:
+    from publisher.sender import _stable_random_id
+
+    seen_random_ids: list[int] = []
+
+    async def capture_random_id(request):
+        seen_random_ids.append(request.random_id[0])
+        return "raw-result"
+
+    client = AsyncMock(side_effect=capture_random_id)
+    client.get_input_entity = AsyncMock(return_value="input-entity")
+    client._get_response_message = Mock(return_value=[FakeMessage(1)])
+    r, repo, limiter = FakeRedis(), FakeRepository(), FakeLimiter()
+    trade_limits = FakeTradeLimits()
+    positions = FakePositions()
+    target = TargetState(entity="target-entity", slow_mode_delay=None)
+
+    await publisher_main.process_entry(
+        "1-0",
+        make_signal_fields("-1001:1"),
+        client=client,
+        target=target,
+        r=r,
+        repo=repo,
+        limiter=limiter,
+        trade_limits=trade_limits,
+        positions=positions,
+        settings=FakeSettings(),
+        friend_target="friend-entity",
+    )
+
+    assert len(seen_random_ids) == 2
+    assert seen_random_ids[0] != seen_random_ids[1]
+    # The friend copy is attempted before the main send.
+    assert seen_random_ids[0] == _stable_random_id("-1001:1", salt="forward:friend")
+    assert seen_random_ids[1] == _stable_random_id("-1001:1", salt="forward")
+
+
+@pytest.mark.asyncio
+async def test_friend_copy_failure_does_not_block_or_retry_the_main_send() -> None:
+    # First call is the friend copy (it's attempted first), second is the main send.
+    call_list = [RuntimeError("friend chat unreachable"), "raw-result"]
+
+    async def dispatch(request):
+        result = call_list.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    client = AsyncMock(side_effect=dispatch)
+    client.get_input_entity = AsyncMock(return_value="input-entity")
+    client._get_response_message = Mock(return_value=[FakeMessage(5)])
+    r, repo, limiter = FakeRedis(), FakeRepository(), FakeLimiter()
+    trade_limits = FakeTradeLimits()
+    positions = FakePositions()
+    target = TargetState(entity="target-entity", slow_mode_delay=None)
+
+    await publisher_main.process_entry(
+        "1-0",
+        make_signal_fields(),
+        client=client,
+        target=target,
+        r=r,
+        repo=repo,
+        limiter=limiter,
+        trade_limits=trade_limits,
+        positions=positions,
+        settings=FakeSettings(),
+        friend_target="friend-entity",
+    )
+
+    assert client.call_count == 2  # one failed friend attempt, one successful main send
+    assert len(repo.sent) == 1
+    assert repo.failed == []
+    assert r.dead_letters == []
+    assert r.acked == [("signals.raw", "publishers", "1-0")]
+
+
+@pytest.mark.asyncio
+async def test_friend_copy_skipped_during_dry_run() -> None:
+    class DryRunSettings(FakeSettings):
+        dry_run = True
+
+    client = make_client(["raw-result"], response_message=[FakeMessage(1)])
+    r, repo, limiter = FakeRedis(), FakeRepository(), FakeLimiter()
+    trade_limits = FakeTradeLimits()
+    positions = FakePositions()
+    target = TargetState(entity="target-entity", slow_mode_delay=None)
+
+    await publisher_main.process_entry(
+        "1-0",
+        make_signal_fields(),
+        client=client,
+        target=target,
+        r=r,
+        repo=repo,
+        limiter=limiter,
+        trade_limits=trade_limits,
+        positions=positions,
+        settings=DryRunSettings(),
+        friend_target="friend-entity",
+    )
+
+    assert client.call_count == 0  # neither the friend copy nor the main send touched Telegram
+    assert len(repo.dry_runs) == 1
+
+
+@pytest.mark.asyncio
+async def test_friend_copy_bypasses_daily_cap_and_concurrent_cap() -> None:
+    class BlockingTradeLimits(FakeTradeLimits):
+        async def check(self, pair, source_chat_id=None):
+            return "daily_cap"
+
+    class AtCapacityPositions(FakePositions):
+        async def is_at_capacity(self):
+            return True
+
+    client = make_client(["friend-raw-result"], response_message=[FakeMessage(1)])
+    r, repo, limiter = FakeRedis(), FakeRepository(), FakeLimiter()
+    target = TargetState(entity="target-entity", slow_mode_delay=None)
+
+    await publisher_main.process_entry(
+        "1-0",
+        make_signal_fields(),
+        client=client,
+        target=target,
+        r=r,
+        repo=repo,
+        limiter=limiter,
+        trade_limits=BlockingTradeLimits(),
+        positions=AtCapacityPositions(),
+        settings=FakeSettings(),
+        friend_target="friend-entity",
+    )
+
+    # The main send is skipped (daily_cap), but the friend still got a copy.
+    assert client.call_count == 1
+    assert len(repo.skipped) == 1
+    assert repo.skipped[0][1] == "daily_cap"
+
+
+@pytest.mark.asyncio
 async def test_same_signal_uses_the_same_random_id_across_retries() -> None:
     # This is the actual fix for "forwarded 5 times": Telegram's server
     # recognizes a repeated random_id and returns the already-created message

@@ -612,3 +612,73 @@ exhaust the day's allowance before a quieter one gets a signal.
 - Known tradeoff: keeps a channel's first N signals of the day, not the best
   N; there's no quality signal to rank by at forward time.
 - No schema migration: reuses `status='skipped'` and `last_error`.
+
+## FRIEND_CHAT: an unconditional, best-effort second destination
+
+Operator request: share every incoming signal with a friend, with none of
+the trade-volume rules (daily cap, channel cap, cooldown, concurrent cap)
+applied to that copy.
+
+### Lives inside `process_entry`, not a separate pipeline
+
+Considered a second independent consumer of `signals.raw` (its own consumer
+group, its own loop) versus a call inside the existing `process_entry`.
+Chose the latter: it's the same publisher client/session already connected
+and already processing every entry, so no new session, container, or
+consumer group is needed -- just one more send call per entry. It also
+means the friend-copy naturally sees every signal exactly once per
+entry-processing pass, same as the real send.
+
+### Placed before every skip-check, not after
+
+The friend-copy call sits at the very top of `process_entry`, before the
+`status == 'sent'` dedup check and before `trade_limits`/`positions` are
+even consulted -- by construction, nothing below it can block it. The one
+condition that *does* suppress it is `DRY_RUN=true`, since dry-run's whole
+point is "touch nothing real," and the friend-copy is a real send.
+
+### A second random_id, not a shared one
+
+`send_signal()` gained `random_id_suffix` specifically for this: the
+existing `_stable_random_id(signal_id, salt=...)` is deterministic per
+signal so our own retries don't create duplicates (see the "forwarded 5
+times" fix). But that dedup is scoped to the *sending account*, not the
+destination chat -- reusing the main target's exact random_id for a second
+peer would make Telegram treat the friend-send as a retry of the first and
+silently not deliver it there at all. The friend-copy passes
+`random_id_suffix=":friend"`, producing a distinct random_id for the same
+signal, while every existing call site keeps its default (`""`) and
+therefore computes the exact same random_id as before this change --
+important so in-flight retries across the deploy stay idempotent.
+
+### Best-effort by design: no retry loop, no dead-letter, no Postgres row
+
+Unlike the main send, a friend-copy failure is caught, logged as
+`friend_copy_failed`, and dropped. Deliberate simplification given the
+operator's framing ("the rules shouldn't apply to him") implies this is a
+convenience, not a guarantee: the friend isn't tracked in Postgres, doesn't
+retry on transient errors, and a permanently-failing friend chat (banned,
+blocked, whatever) never pauses or dead-letters the real pipeline the way a
+`TARGET_CHAT` permanent error does. Idempotency still holds if the *same*
+entry is reprocessed (a claim_loop reclaim before the original attempt was
+ever acked) since the random_id is stable -- Telegram just no-ops the
+repeat -- but a friend-copy that failed and was never retried is simply
+gone, not eventually consistent.
+
+### Startup resolution mirrors TARGET_CHAT's preflight, but never exits
+
+`FRIEND_CHAT` is resolved and preflighted the same way as `TARGET_CHAT`
+(reusing `preflight()`), but a failure only logs `friend_chat_not_writable`
+and leaves `friend_target = None` for that run, rather than `sys.exit(4)`
+-- a misconfigured or now-unreachable friend chat must never take down
+actual trade forwarding.
+
+### Shares the account-safety RateLimiter, not a separate budget
+
+The friend-copy calls `limiter.wait()`/`record_send()` on the *same*
+`RateLimiter` instance as the real send, so `MIN_SEND_INTERVAL`,
+`SEND_JITTER`, and `MAX_SENDS_PER_HOUR` govern the account's total outgoing
+message rate regardless of destination -- what actually matters for
+avoiding Telegram flagging the account is total send behavior, not
+per-destination volume. One consequence worth knowing: every signal now
+costs up to two sends against `MAX_SENDS_PER_HOUR` instead of one.

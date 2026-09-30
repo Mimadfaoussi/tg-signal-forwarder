@@ -76,6 +76,39 @@ async def ensure_group(r: aioredis.Redis) -> None:
             raise
 
 
+async def _forward_to_friend(
+    client: Any,
+    friend_target: Any,
+    signal: Signal,
+    *,
+    limiter: RateLimiter,
+    output_mode: str,
+    bound_log: Any,
+) -> None:
+    """Best-effort copy to FRIEND_CHAT: none of the trade-volume rules apply,
+    and unlike the main send, a failure here is only logged, never retried
+    or dead-lettered -- it must never affect the real pipeline. Uses its own
+    random_id (via `random_id_suffix`) so it's a genuinely separate send from
+    the main target's, and stays idempotent across reclaims/restarts the
+    same way the main send does.
+    """
+    try:
+        await limiter.wait(slow_mode_delay=None, log=bound_log)
+        await send_signal(
+            client,
+            target=friend_target,
+            target_topic_id=None,
+            output_mode=output_mode,
+            signal=signal,
+            template_dir=TEMPLATE_DIR,
+            random_id_suffix=":friend",
+        )
+        await limiter.record_send()
+        bound_log.info("friend_copy_sent")
+    except Exception as exc:  # noqa: BLE001 - best-effort: never affects the main pipeline
+        bound_log.warning("friend_copy_failed", error=str(exc))
+
+
 async def process_entry(
     entry_id: str,
     fields: dict[str, str],
@@ -88,6 +121,7 @@ async def process_entry(
     trade_limits: TradeLimits,
     positions: PositionTracker,
     settings: PublisherSettings,
+    friend_target: Any | None = None,
 ) -> None:
     raw_payload = fields.get("payload")
     if raw_payload is None:
@@ -103,6 +137,19 @@ async def process_entry(
         return
 
     bound_log = log.bind(signal_id=signal.signal_id, pair=signal.pair)
+
+    # Unconditional and independent of every check below (daily cap, cooldown,
+    # concurrent cap, dedup-by-status): the friend gets every signal that
+    # reaches this point, with none of the trade-volume rules applied to them.
+    if friend_target is not None and not settings.dry_run:
+        await _forward_to_friend(
+            client,
+            friend_target,
+            signal,
+            limiter=limiter,
+            output_mode=settings.output_mode,
+            bound_log=bound_log,
+        )
 
     status = await repo.get_status(signal.signal_id)
     if status == "sent":
@@ -200,6 +247,7 @@ async def main_loop(
     trade_limits: TradeLimits,
     positions: PositionTracker,
     settings: PublisherSettings,
+    friend_target: Any | None = None,
 ) -> None:
     consumer = socket.gethostname()
     while True:
@@ -220,6 +268,7 @@ async def main_loop(
                         trade_limits=trade_limits,
                         positions=positions,
                         settings=settings,
+                        friend_target=friend_target,
                     )
                 except PermanentSendError:
                     await _handle_permanent_error(client, target, settings)
@@ -238,6 +287,7 @@ async def claim_loop(
     trade_limits: TradeLimits,
     positions: PositionTracker,
     settings: PublisherSettings,
+    friend_target: Any | None = None,
 ) -> None:
     consumer = socket.gethostname()
     while True:
@@ -262,6 +312,7 @@ async def claim_loop(
                             trade_limits=trade_limits,
                             positions=positions,
                             settings=settings,
+                            friend_target=friend_target,
                         )
                     except PermanentSendError:
                         await _handle_permanent_error(client, target, settings)
@@ -335,6 +386,21 @@ async def async_main() -> None:
     target_entity = await client.get_entity(settings.target_chat)
     target = TargetState(entity=target_entity, slow_mode_delay=permission.slow_mode_delay)
 
+    # Optional, best-effort second destination: unlike TARGET_CHAT, a
+    # problem here never stops the publisher -- it just disables the
+    # friend-copy for this run and logs why.
+    friend_target: Any | None = None
+    if settings.friend_chat:
+        try:
+            await preflight(client, settings.friend_chat, log)
+            friend_target = await client.get_entity(settings.friend_chat)
+        except TargetNotWritable as exc:
+            log.warning(
+                "friend_chat_not_writable",
+                friend_chat=settings.friend_chat,
+                reason=exc.permission.reason,
+            )
+
     repo = SignalRepository(pool)
     limiter = RateLimiter(
         r,
@@ -380,15 +446,20 @@ async def async_main() -> None:
         max_trades_per_channel_per_day=settings.max_trades_per_channel_per_day,
         pair_cooldown_hours=settings.pair_cooldown_hours,
         max_concurrent_trades=settings.max_concurrent_trades,
+        friend_chat_enabled=friend_target is not None,
     )
 
     tasks = [
         asyncio.create_task(heartbeat_loop()),
         asyncio.create_task(
-            main_loop(client, target, r, repo, limiter, trade_limits, positions, settings)
+            main_loop(
+                client, target, r, repo, limiter, trade_limits, positions, settings, friend_target
+            )
         ),
         asyncio.create_task(
-            claim_loop(client, target, r, repo, limiter, trade_limits, positions, settings)
+            claim_loop(
+                client, target, r, repo, limiter, trade_limits, positions, settings, friend_target
+            )
         ),
     ]
     try:

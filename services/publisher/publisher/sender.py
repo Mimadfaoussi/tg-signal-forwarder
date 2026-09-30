@@ -115,6 +115,7 @@ async def send_signal(
     output_mode: str,
     signal: Signal,
     template_dir: str,
+    random_id_suffix: str = "",
 ) -> Any:
     """Sends the signal to `target` and returns the resulting Message.
 
@@ -125,7 +126,11 @@ async def send_signal(
 
     Uses the raw API directly (rather than client.forward_messages /
     client.send_message) so a deterministic random_id can be supplied --
-    see `_stable_random_id`.
+    see `_stable_random_id`. `random_id_suffix` lets a second, independent
+    destination (e.g. a friend-copy) get its own random_id for the same
+    signal -- reusing the primary target's random_id for a different peer
+    would make Telegram treat it as a retry of the first send and silently
+    skip delivering it to the second one.
     """
     to_peer = await client.get_input_entity(target)
 
@@ -140,7 +145,7 @@ async def send_signal(
             reply_to=(
                 None if target_topic_id is None else tl_types.InputReplyToMessage(target_topic_id)
             ),
-            random_id=_stable_random_id(signal.signal_id, salt="template"),
+            random_id=_stable_random_id(signal.signal_id, salt=f"template{random_id_suffix}"),
         )
         result = await client(request)
         return client._get_response_message(request, result, to_peer)
@@ -150,7 +155,7 @@ async def send_signal(
         from_peer=from_peer,
         id=[signal.source_message_id],
         to_peer=to_peer,
-        random_id=[_stable_random_id(signal.signal_id, salt="forward")],
+        random_id=[_stable_random_id(signal.signal_id, salt=f"forward{random_id_suffix}")],
     )
     result = await client(request)
     sent = client._get_response_message(request, result, to_peer)
