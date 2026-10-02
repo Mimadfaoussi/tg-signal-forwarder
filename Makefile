@@ -52,6 +52,14 @@ login-publisher: ## Interactively log in the publisher's session and check TARGE
 check-target: ## Run only the publisher's target preflight check and exit
 	$(COMPOSE) run --rm --no-deps publisher python -m publisher.sender
 
+.PHONY: extract-signals
+extract-signals: ## One-off: pull every past signal from CHAT into exports/OUT (make extract-signals CHAT=@channel OUT=channel.json [LIMIT=500])
+	@test -n "$(CHAT)" || (echo "Usage: make extract-signals CHAT=@channel OUT=channel.json [LIMIT=500]" && exit 1)
+	@test -n "$(OUT)" || (echo "Usage: make extract-signals CHAT=@channel OUT=channel.json [LIMIT=500]" && exit 1)
+	mkdir -p exports
+	$(COMPOSE) run --rm --no-deps listener python -m listener.extract \
+		--chat "$(CHAT)" --out "/data/exports/$(OUT)" $(if $(LIMIT),--limit $(LIMIT),)
+
 .PHONY: up
 up: ## Start the stack in the background
 	$(COMPOSE) up -d

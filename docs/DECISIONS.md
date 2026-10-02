@@ -682,3 +682,53 @@ message rate regardless of destination -- what actually matters for
 avoiding Telegram flagging the account is total send behavior, not
 per-destination volume. One consequence worth knowing: every signal now
 costs up to two sends against `MAX_SENDS_PER_HOUR` instead of one.
+
+## `make extract-signals`: an on-demand channel history dump
+
+Operator request: pull every past signal from one specific channel into a
+JSON file, as a tool used occasionally, not part of the regular stack.
+
+### The classify+parse logic moved to `shared/`, not `listener/`
+
+`extract_from_messages()` (classify each message via `is_signal`, parse the
+matches via `parse_signal`) started out inside `listener/extract.py`,
+mirroring `listener.main.handle_message`'s per-message logic. Moved to
+`shared/signal_shared/extract.py` instead, for a build reason, not just a
+style preference: `make test`'s container is built from
+`services/publisher/Dockerfile`, which only ever `COPY`s `shared/` and
+`services/publisher/` -- `services/listener/` was never part of that image,
+so nothing under `listener/` has ever been unit-testable in this project's
+existing test setup (no prior test imported it either). Rather than teach
+the test Dockerfile about a second service's dependencies just for this,
+the pure logic (no Telethon, no CLI, no I/O) moved to `shared/`, which the
+test image already has -- `listener/extract.py` now just wires the CLI
+args and the real Telethon client around it, left untested the same way
+`listener.main.async_main` itself is.
+
+### Reuses `listener`'s session, not a new one
+
+No new Telegram login: it connects with the listener's existing
+`listener.session`, since the account is already authorized and a member
+of whatever channel gets extracted. The tradeoff is the same one already
+documented for re-running `make login-listener` while the listener service
+is live: two connections sharing one session file risks
+`AUTH_KEY_DUPLICATED`. Given this is explicitly a rare, manual tool (not
+something run alongside normal operation without thinking about it), that
+tradeoff was accepted rather than provisioning a third session file for a
+tool used "when needed only."
+
+### `--limit` means "most recent N", not "first N"
+
+`client.iter_messages()` without `reverse=True` walks newest-to-oldest, so
+`--limit=500` naturally caps to the 500 most recent messages -- the
+intuitive reading of "limit" for someone pulling recent history, rather
+than the channel's oldest 500. The output is still sorted oldest-first
+before writing, regardless of fetch order, since a signal history file is
+more useful read chronologically.
+
+### Output format matches the internal `Signal` model exactly
+
+`Signal.model_dump(mode="json")` is reused as-is rather than inventing an
+export-specific schema -- same fields Postgres stores, same shape every
+other test fixture in this repo already uses, so anyone touching the
+output later has one shape to know, not two.

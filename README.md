@@ -262,6 +262,30 @@ make fmt
 `docker-compose.override.example.yml` shows how to mount source code for live
 editing — copy it to `docker-compose.override.yml` to use it.
 
+## Extracting a channel's signal history
+
+A one-off tool, used only when needed — it doesn't run as part of the
+regular stack. Pulls every message from a channel's history, classifies
+each one exactly like the live listener would (same `is_signal`/`parse_signal`
+logic, same `QUOTE_ASSETS` filter), and writes the matches to a JSON file
+under `exports/` on the host:
+
+```bash
+make extract-signals CHAT=@somechannel OUT=somechannel.json
+# or limit it to the most recent N messages instead of the whole history:
+make extract-signals CHAT=@somechannel OUT=somechannel.json LIMIT=500
+```
+
+`CHAT` accepts the same `-100xxxxxxxxxx` or `@username` form as
+`SOURCE_CHAT`/`TARGET_CHAT`, and the account must already be a member of
+that channel. The output is a JSON array of the same `Signal` structure
+used internally (pair, entries, take-profits, stop, raw text, etc.),
+sorted oldest-first. It reuses the listener's existing session — no
+separate login needed — but that means it opens a *second* connection on
+that session file: if the listener service is currently running, briefly
+stop it first (`docker compose stop listener`) to avoid risking
+`AUTH_KEY_DUPLICATED`, same caution as re-running `make login-listener`.
+
 ## Troubleshooting
 
 - **Listener or publisher exits with `session_not_authorized` (code 2):** run
