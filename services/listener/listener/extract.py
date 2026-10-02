@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
-from signal_shared.extract import extract_from_messages, serialize_messages
+from signal_shared.export import build_chat_export
+from signal_shared.extract import extract_from_messages
 from signal_shared.logging import get_logger
 from signal_shared.settings import describe_config_error
 from signal_shared.telegram import make_client
@@ -22,7 +23,7 @@ log = get_logger()
 
 async def _run(
     chat: str, *, limit: int | None, mode: str, settings: ListenerSettings
-) -> list[dict[str, Any]]:
+) -> dict[str, Any] | list[dict[str, Any]]:
     client = make_client(
         settings.session_path, settings.tg_api_id, settings.tg_api_hash, "signal-extract"
     )
@@ -42,9 +43,7 @@ async def _run(
         print(f"Scanned {len(messages)} message(s) from {chat}...", file=sys.stderr)
 
         if mode == "full":
-            records = serialize_messages(messages)
-            records.sort(key=lambda r: r["date"] or "")
-            return records
+            return build_chat_export(entity, messages)
 
         signals = extract_from_messages(
             messages, chat_id=chat_id, quote_assets=settings.quote_assets_list
@@ -73,7 +72,8 @@ def main() -> None:
         choices=["signals", "full"],
         default="signals",
         help="'signals' (default): only messages classified as trade signals, parsed into "
-        "fields. 'full': every message in the chat, unfiltered and unparsed.",
+        "fields. 'full': every message in the chat, unfiltered, in Telegram Desktop's own "
+        "export format.",
     )
     args = parser.parse_args()
 
@@ -83,16 +83,19 @@ def main() -> None:
         print(f"config_error: {describe_config_error(exc)}", file=sys.stderr)
         sys.exit(1)
 
-    records = asyncio.run(_run(args.chat, limit=args.limit, mode=args.mode, settings=settings))
+    result = asyncio.run(_run(args.chat, limit=args.limit, mode=args.mode, settings=settings))
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
-        json.dumps(records, indent=2, ensure_ascii=False),
+        json.dumps(result, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    unit = "signal" if args.mode == "signals" else "message"
-    print(f"Extracted {len(records)} {unit}(s) from {args.chat} -> {out_path}")
+    if args.mode == "full":
+        count, unit = len(result["messages"]), "message"  # type: ignore[index,call-overload]
+    else:
+        count, unit = len(result), "signal"
+    print(f"Extracted {count} {unit}(s) from {args.chat} -> {out_path}")
 
 
 if __name__ == "__main__":

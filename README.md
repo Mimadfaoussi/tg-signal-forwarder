@@ -286,9 +286,23 @@ make extract-signals CHAT=@somechannel OUT=somechannel.json LIMIT=500
 `SOURCE_CHAT`/`TARGET_CHAT`, and the account must already be a member of
 that channel. Default mode (`signals`) outputs a JSON array of the same
 `Signal` structure used internally (pair, entries, take-profits, stop, raw
-text, etc.); `MODE=full` outputs a JSON array of plain message records
-(`message_id`, `date`, `sender_id`, `text`, `entities`) with nothing
-classified or dropped. Both are sorted oldest-first.
+text, etc.), sorted oldest-first.
+
+`MODE=full` outputs a single JSON object shaped like Telegram Desktop's own
+chat export (`{name, type, id, messages: [...]}`) instead of this project's
+own format, so it can be opened with the same tools/scripts people already
+use for Desktop exports. Per message: `id`, `type` (`message`/`service`),
+`date`/`date_unixtime`, `text`/`text_entities` (rich-text formatting split
+out the same way Desktop does it), `from`/`from_id` (or `author` for a
+channel's post signature), `reply_to_message_id`, `forwarded_from`,
+`reactions`, `poll`, media fields (always the placeholder string
+`"(File not included. Change data exporting settings to download.)"` plus
+type-specific metadata — no actual files are downloaded), and service
+actions (`pin_message`, `create_channel`, `edit_group_photo`, etc.) are all
+covered on a best-effort basis. Media types and service actions outside
+common usage (gifts, giveaways, boosts, calls, and similar) aren't
+specifically handled and fall back to a labeled placeholder rather than
+being dropped silently.
 
 It reuses the listener's existing session — no separate login needed —
 but that means it opens a *second* connection on that session file: if the

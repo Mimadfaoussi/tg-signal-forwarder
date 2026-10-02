@@ -33,23 +33,3 @@ def extract_from_messages(
         )
         signals.append(signal)
     return signals
-
-
-def serialize_messages(messages: list[Any]) -> list[dict[str, Any]]:
-    """Plain, unfiltered dump of every message (only `.id`, `.date`,
-    `.raw_text`, `.sender_id`, `.entities` are used) -- unlike
-    `extract_from_messages`, nothing is classified or parsed, so this covers
-    a full chat-history export rather than just the recognized trade signals.
-    """
-    records: list[dict[str, Any]] = []
-    for message in messages:
-        records.append(
-            {
-                "message_id": message.id,
-                "date": message.date.isoformat() if message.date else None,
-                "sender_id": getattr(message, "sender_id", None),
-                "text": message.raw_text or "",
-                "entities": [e.to_dict() for e in (message.entities or [])],
-            }
-        )
-    return records

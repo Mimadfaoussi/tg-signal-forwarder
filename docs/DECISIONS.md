@@ -738,16 +738,68 @@ output later has one shape to know, not two.
 Follow-up operator request: extract a channel's *entire* history, not just
 the messages that classify as trade signals. Added `--mode {signals,full}`
 rather than a separate script, since both share everything except the
-per-message step: `full` calls the new `serialize_messages()` (no
-`is_signal`/`parse_signal` involved at all -- every message becomes one
-record) instead of `extract_from_messages()`. `serialize_messages()` lives
-in `shared/signal_shared/extract.py` next to `extract_from_messages()` for
-the same reason that one is there (see above): pure, Telethon-shaped-duck-typed,
-and testable without a connection.
+per-message step: `full` bypasses `is_signal`/`parse_signal` entirely and
+builds a record for every message.
 
-`full` mode's record shape (`message_id`, `date`, `sender_id`, `text`,
-`entities`) is intentionally not the `Signal` model -- most messages in
-`full` mode were never meant to be a trade signal at all (chit-chat,
-announcements, images), so forcing them through `parse_signal` would just
-produce a pile of `parse_ok=False` noise. A plain, generic message record
-is the honest shape for "the whole chat, as-is."
+`full` mode's record shape is intentionally not the `Signal` model -- most
+messages in `full` mode were never meant to be a trade signal at all
+(chit-chat, announcements, images), so forcing them through `parse_signal`
+would just produce a pile of `parse_ok=False` noise. A generic message
+record is the honest shape for "the whole chat, as-is." (Originally this
+was a minimal ad hoc shape -- `message_id`/`date`/`sender_id`/`text`/
+`entities` -- superseded by the Telegram-Desktop-compatible format below
+the same day, once the actual use case turned out to be re-import into
+existing Desktop-export tooling rather than ad hoc inspection.)
+
+### `MODE=full`'s record shape: matching Telegram Desktop's own export format
+
+Operator request, with a real Telegram Desktop export (`result.json`)
+supplied as the target shape: make `full` mode's output structurally
+compatible with Desktop's own JSON export (`{name, type, id, messages:
+[...]}`, each message carrying Desktop's own field names) rather than this
+project's own ad hoc shape, so the file drops into whatever tooling people
+already have for Desktop exports.
+
+Implementation lives in `shared/signal_shared/export.py`, not
+`listener/extract.py` or `signal_shared/extract.py`: it is a pure mapping
+from Telethon's `types.Message`/`types.MessageService` objects (plus the
+chat `entity`) to Desktop's schema, with no network or classification
+logic of its own, so it's unit-testable against real `telethon.tl.types`
+objects without a connection -- the same reasoning that kept
+`extract_from_messages` pure and separate.
+
+Key points that weren't obvious from the schema alone:
+
+- **UTF-16 offsets.** Telegram entity `offset`/`length` are UTF-16 code
+  units; Python strings are code-point-indexed. Any character outside the
+  Basic Multilingual Plane (many emoji) would silently misalign every
+  later entity if sliced directly. `split_text_with_entities()` goes
+  through Telethon's own `helpers.add_surrogate`/`del_surrogate` to slice
+  correctly, then reassembles Desktop's two paired fields: `text` (a bare
+  string when there's no formatting, otherwise a list mixing plain
+  substrings with entity dicts) and `text_entities` (always a list, every
+  segment -- plain included -- an explicit dict).
+- **Sender resolution is best-effort, not an extra API call.** A channel
+  post's `from_id` is `None` (the channel itself is the sender); Telethon
+  exposes `message.sender`/`message.chat` as properties that read from the
+  entity cache already populated by the same `GetHistory` call used to
+  fetch the messages -- no additional round trip. When nothing is cached,
+  `from`/`actor` fall back to the bare `"channel<id>"`/`"user<id>"` string
+  rather than failing.
+- **Scope is deliberately bounded to the common case.** Reactions, polls,
+  and the handful of media types and service actions (`pin_message`,
+  `create_channel`, `edit_group_photo`, etc.) that actually show up in a
+  trade-signal channel's history are mapped field-for-field. Telegram has
+  dozens of other `MessageAction*`/media variants (gifts, giveaways,
+  boosts, group calls, ...) that are exceedingly unlikely here; rather than
+  attempting to cover all of them (or silently dropping what doesn't fit),
+  unrecognized ones fall back to a labeled passthrough
+  (`"unsupported_<ClassName>"`) so nothing in the export is ever silently
+  lost, and bug reports are easy to connect to a specific Telethon type if
+  real-world history ever exercises one.
+- **No files are ever downloaded.** Media fields always use Desktop's own
+  literal placeholder string (`"(File not included. Change data exporting
+  settings to download.)"`) plus whatever metadata Telegram's API already
+  returns without fetching the file itself (size, dimensions, duration,
+  filename, mime type) -- consistent with this tool never touching message
+  content/files beyond what `iter_messages` already returns.
