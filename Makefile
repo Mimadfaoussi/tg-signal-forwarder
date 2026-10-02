@@ -53,12 +53,13 @@ check-target: ## Run only the publisher's target preflight check and exit
 	$(COMPOSE) run --rm --no-deps publisher python -m publisher.sender
 
 .PHONY: extract-signals
-extract-signals: ## One-off: pull every past signal from CHAT into exports/OUT (make extract-signals CHAT=@channel OUT=channel.json [LIMIT=500])
-	@test -n "$(CHAT)" || (echo "Usage: make extract-signals CHAT=@channel OUT=channel.json [LIMIT=500]" && exit 1)
-	@test -n "$(OUT)" || (echo "Usage: make extract-signals CHAT=@channel OUT=channel.json [LIMIT=500]" && exit 1)
+extract-signals: ## One-off: dump CHAT's history into exports/OUT as JSON (make extract-signals CHAT=@channel OUT=channel.json [LIMIT=500] [MODE=full])
+	@test -n "$(CHAT)" || (echo "Usage: make extract-signals CHAT=@channel OUT=channel.json [LIMIT=500] [MODE=full]" && exit 1)
+	@test -n "$(OUT)" || (echo "Usage: make extract-signals CHAT=@channel OUT=channel.json [LIMIT=500] [MODE=full]" && exit 1)
 	mkdir -p exports
 	$(COMPOSE) run --rm --no-deps listener python -m listener.extract \
-		--chat "$(CHAT)" --out "/data/exports/$(OUT)" $(if $(LIMIT),--limit $(LIMIT),)
+		--chat "$(CHAT)" --out "/data/exports/$(OUT)" \
+		$(if $(LIMIT),--limit $(LIMIT),) $(if $(MODE),--mode $(MODE),)
 
 .PHONY: up
 up: ## Start the stack in the background

@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from signal_shared.extract import extract_from_messages
+from signal_shared.extract import extract_from_messages, serialize_messages
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 
@@ -17,6 +17,7 @@ class FakeMessage:
     raw_text: str
     date: datetime = field(default_factory=lambda: datetime(2026, 9, 14, 12, 0, tzinfo=UTC))
     entities: list | None = None
+    sender_id: int | None = None
 
 
 def test_only_classifiable_messages_become_signals() -> None:
@@ -60,3 +61,43 @@ def test_entities_are_serialized_via_to_dict() -> None:
     [signal] = extract_from_messages(messages, chat_id=-1001, quote_assets=["USDT"])
 
     assert signal.raw_entities == [{"_": "MessageEntityBold", "offset": 0, "length": 4}]
+
+
+def test_serialize_messages_includes_every_message_unfiltered() -> None:
+    messages = [
+        FakeMessage(id=1, raw_text=_read_fixture("signal_saga.txt")),
+        FakeMessage(id=2, raw_text="good morning everyone!"),
+    ]
+
+    records = serialize_messages(messages)
+
+    assert len(records) == 2  # unlike extract_from_messages, nothing is dropped
+    assert records[1]["text"] == "good morning everyone!"
+
+
+def test_serialize_messages_fields() -> None:
+    class FakeEntity:
+        def to_dict(self) -> dict:
+            return {"_": "MessageEntityBold", "offset": 0, "length": 4}
+
+    message = FakeMessage(
+        id=7,
+        raw_text="hello",
+        date=datetime(2026, 9, 14, 12, 30, tzinfo=UTC),
+        entities=[FakeEntity()],
+        sender_id=555,
+    )
+
+    [record] = serialize_messages([message])
+
+    assert record == {
+        "message_id": 7,
+        "date": "2026-09-14T12:30:00+00:00",
+        "sender_id": 555,
+        "text": "hello",
+        "entities": [{"_": "MessageEntityBold", "offset": 0, "length": 4}],
+    }
+
+
+def test_serialize_messages_empty_history() -> None:
+    assert serialize_messages([]) == []

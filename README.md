@@ -262,29 +262,39 @@ make fmt
 `docker-compose.override.example.yml` shows how to mount source code for live
 editing — copy it to `docker-compose.override.yml` to use it.
 
-## Extracting a channel's signal history
+## Extracting a channel's history
 
 A one-off tool, used only when needed — it doesn't run as part of the
-regular stack. Pulls every message from a channel's history, classifies
-each one exactly like the live listener would (same `is_signal`/`parse_signal`
-logic, same `QUOTE_ASSETS` filter), and writes the matches to a JSON file
-under `exports/` on the host:
+regular stack. Pulls a channel's message history and writes it to a JSON
+file under `exports/` on the host, in one of two modes:
 
 ```bash
+# Default: only messages classified as trade signals, parsed into fields
+# (same is_signal/parse_signal logic and QUOTE_ASSETS filter the live
+# listener uses).
 make extract-signals CHAT=@somechannel OUT=somechannel.json
-# or limit it to the most recent N messages instead of the whole history:
+
+# Every message in the chat, unfiltered and unparsed -- the entire history
+# as-is, not just the ones that look like trade signals.
+make extract-signals CHAT=@somechannel OUT=somechannel_full.json MODE=full
+
+# Either mode: cap it to the most recent N messages instead of the whole history.
 make extract-signals CHAT=@somechannel OUT=somechannel.json LIMIT=500
 ```
 
 `CHAT` accepts the same `-100xxxxxxxxxx` or `@username` form as
 `SOURCE_CHAT`/`TARGET_CHAT`, and the account must already be a member of
-that channel. The output is a JSON array of the same `Signal` structure
-used internally (pair, entries, take-profits, stop, raw text, etc.),
-sorted oldest-first. It reuses the listener's existing session — no
-separate login needed — but that means it opens a *second* connection on
-that session file: if the listener service is currently running, briefly
-stop it first (`docker compose stop listener`) to avoid risking
-`AUTH_KEY_DUPLICATED`, same caution as re-running `make login-listener`.
+that channel. Default mode (`signals`) outputs a JSON array of the same
+`Signal` structure used internally (pair, entries, take-profits, stop, raw
+text, etc.); `MODE=full` outputs a JSON array of plain message records
+(`message_id`, `date`, `sender_id`, `text`, `entities`) with nothing
+classified or dropped. Both are sorted oldest-first.
+
+It reuses the listener's existing session — no separate login needed —
+but that means it opens a *second* connection on that session file: if the
+listener service is currently running, briefly stop it first
+(`docker compose stop listener`) to avoid risking `AUTH_KEY_DUPLICATED`,
+same caution as re-running `make login-listener`.
 
 ## Troubleshooting
 

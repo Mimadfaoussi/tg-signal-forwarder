@@ -732,3 +732,22 @@ more useful read chronologically.
 export-specific schema -- same fields Postgres stores, same shape every
 other test fixture in this repo already uses, so anyone touching the
 output later has one shape to know, not two.
+
+### `MODE=full`: a second, unfiltered extraction path
+
+Follow-up operator request: extract a channel's *entire* history, not just
+the messages that classify as trade signals. Added `--mode {signals,full}`
+rather than a separate script, since both share everything except the
+per-message step: `full` calls the new `serialize_messages()` (no
+`is_signal`/`parse_signal` involved at all -- every message becomes one
+record) instead of `extract_from_messages()`. `serialize_messages()` lives
+in `shared/signal_shared/extract.py` next to `extract_from_messages()` for
+the same reason that one is there (see above): pure, Telethon-shaped-duck-typed,
+and testable without a connection.
+
+`full` mode's record shape (`message_id`, `date`, `sender_id`, `text`,
+`entities`) is intentionally not the `Signal` model -- most messages in
+`full` mode were never meant to be a trade signal at all (chit-chat,
+announcements, images), so forcing them through `parse_signal` would just
+produce a pile of `parse_ok=False` noise. A plain, generic message record
+is the honest shape for "the whole chat, as-is."
